@@ -3,11 +3,7 @@ import os
 from typing import Tuple
 import torch
 from torch import nn, Tensor
-from torch import optim
 import torch.nn.functional as F
-from torch.optim import Adam, AdamW
-from collections import namedtuple
-from rl.bert_predictor import EmbedderWithAbsoluteEncoding
 from envs.utils import custom_pad_sequence, stack_memory, stack_text_list
 from ..q_module import TextQNet, TextQNetPolicy, TextRandomPolicy, ActionEmbedTarget, TextMaxQNet, TextVNet
 from envs.utils import TextMemory, TextMemoryItem
@@ -106,6 +102,7 @@ class PQN(object):
         state_embed_copy = copy.deepcopy(state_embed)
         
         self.critic = TextQNet(state_embed, action_embed).to(torch.get_default_device())
+        # 优化参数
         self.critic_optim = instantiate(config.pqn.optimizer, params=self.critic.parameters())
         self.scheduler = instantiate(config.pqn.scheduler, optimizer=self.critic_optim)
        
@@ -113,7 +110,7 @@ class PQN(object):
         self.random_policy = TextRandomPolicy().to(torch.get_default_device())
 
         self.v_net_target = TextVNet(state_embed_target, self.critic).to(torch.get_default_device())
-        self.action_embed_target = ActionEmbedTarget(action_embed_target, self.critic).to(torch.get_default_device())
+        self.action_embed_target = ActionEmbedTarget(action_embed_target, self.critic).to(torch.get_default_device())  # 不通过梯度更新
 
         self.state_tokenizer = state_embed.tokenizer
         self.action_tokenizer = action_embed.tokenizer
@@ -174,79 +171,6 @@ class PQN(object):
         action, q_values, q_values_target =  self.select_action_batch(state, a_embeds, a_embeds_target, evaluate, random)
 
         return action.item(), q_values, q_values_target
-        
-    
-    # @torch.no_grad()
-    # def _get_target(self, lambda_returns, next_q, q_values, rewards, dones_mask):
-    #     target_bootstrap = (
-    #         rewards + self.gamma * dones_mask * next_q
-    #     )
-    #     delta = lambda_returns - next_q
-    #     lambda_returns = (
-    #         target_bootstrap + self.gamma * self.Lambda * delta
-    #     )
-    #     lambda_returns = dones_mask * lambda_returns + (1.0 - dones_mask) * rewards
-    #     next_q = q_values
-    #
-    #     return lambda_returns, next_q
-
-
-    # def update_old(self,
-    #             state_batch: TextMemory,
-    #             action_batch: TextMemoryItem,
-    #             next_state_batch: TextMemory,
-    #             q_values_batch: Tensor,
-    #             reward_batch: Tensor,
-    #             mask_batch: Tensor):
-    #
-    #
-    #     last_q = mask_batch[:, -2] * q_values_batch[:, -1]
-    #     lambda_returns = reward_batch[:, -2] + self.gamma * last_q
-    #
-    #     targets = [lambda_returns]
-    #
-    #     for t in range(q_values_batch.shape[1] - 3, -1, -1):
-    #         lambda_returns, last_q = self._get_target(lambda_returns, last_q, q_values_batch[:, t], reward_batch[:, t], mask_batch[:, t])
-    #         targets.append(lambda_returns)
-    #
-    #     targets.reverse()
-    #     targets = torch.stack(targets, dim=1)
-    #     assert targets.shape[0] == q_values_batch.shape[0]
-    #     assert targets.shape[1] == q_values_batch.shape[1] - 1
-    #     targets = targets.reshape(-1)
-    #
-    #     state_batch = TextMemory(
-    #             item_ids=None,
-    #             available_ids=None,
-    #             available_mask=state_batch.available_mask,
-    #             text=None,
-    #             input_ids=state_batch.input_ids,
-    #             attention_mask=state_batch.attention_mask
-    #         )
-    #
-    #     action_batch = TextMemoryItem(
-    #         index=None,
-    #         position=torch.tensor(action_batch.position, device=action_batch.input_ids.device, dtype=torch.float32),
-    #         input_ids=action_batch.input_ids,
-    #         attention_mask=action_batch.attention_mask,
-    #         text=None
-    #     )
-    #
-    #     qf_loss = self.train_step(self.critic, state_batch, action_batch, targets) #computes backward inside
-    #
-    #     self._update_step += 1
-    #     if self._update_step % self.accumulate_grads == 0:
-    #         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-    #         self.critic_optim.step()
-    #         self.scheduler.step()
-    #         self.critic_optim.zero_grad()
-    #
-    #         self.alpha = self.alpha_start * float(self.scheduler.get_lr()[0]) / self.start_lr
-    #         self.v_net_target.update(self.critic, self.tau)
-    #         self.action_embed_target.update(self.critic, self.tau)
-    #         self.policy.update(self.critic)
-    #
-    #     return qf_loss.item()
 
 
     def update(

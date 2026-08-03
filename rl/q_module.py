@@ -34,6 +34,7 @@ class TextQNet(nn.Module):
 
     def __init__(self, state_embed, action_embed) -> None:
         super().__init__()
+        # 算法优化的参数
         self.state_embed = state_embed
         self.action_embed = action_embed
         # self.action_embed.eval()

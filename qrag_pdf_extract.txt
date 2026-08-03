@@ -1,0 +1,1563 @@
+===== PAGE 1 =====
+PublishedasaconferencepaperatICLR2026
+Q-RAG: LONG CONTEXT MULTI-STEP RETRIEVAL
+VIA VALUE-BASED EMBEDDER TRAINING
+ArtyomSorokin1,2,†,NazarBuzun1,3,∗,AlexanderAnokhin2,OlegInozemcev2,EgorVedernikov2,
+PetrAnokhin1,MikhailBurtsev4,TrushkovAlexey6,YinWenshuai5,EvgenyBurnaev1,2
+1AXXX,Moscow,Russia
+2AppliedAIInstitute,Moscow,Russia
+3ResearchCenteroftheArtificialIntelligenceInstitute,InnopolisUniversity,Innopolis,Russia
+4LondonInstituteforMathematicalSciences,London,UK
+5HigherSchoolofEconomics,Moscow,Russia
+6IndependentResearcher
+Correspondenceto: griver29@gmail.com†,n.buzun@seevia.ai∗.
+ABSTRACT
+Retrieval-AugmentedGeneration(RAG)methodsenhanceLLMperformanceby
+efficientlyfilteringrelevantcontextforLLMs,reducinghallucinationsandinfer-
+ence cost. However, most existing RAG methods focus on single-step retrieval,
+which is often insufficient for answering complex questions that require multi-
+step search. Recently, multi-step retrieval approaches have emerged, typically
+involvingthefine-tuningofsmallLLMstoperformmulti-stepretrieval. Thistype
+of fine-tuning is highly resource-intensive and does not enable the use of larger
+LLMs.Inthiswork,weproposeQ-RAG,anovelapproachthatfine-tunestheEm-
+beddermodelformulti-stepretrievalusingreinforcementlearning(RL).Q-RAG
+offers a competitive, resource-efficient alternative to existing multi-step retrieval
+methodsforopen-domainquestionansweringandachievesstate-of-the-artresults
+onthepopularlong-contextbenchmarksBabiLongandRULERforcontextsupto
+10Mtokens. Codeisavailableat: https://github.com/griver/Q-RAG.
+1 INTRODUCTION
+Large language models (LLMs) have achieved impressive results across a wide range of tasks
+(Novikovetal.,2025;Guoetal.,2025;Yangetal.,2025). However, theystillfaceseveralfunda-
+mentallimitationssuchasstaticknowledge,computationalinefficiencyonlongcontexts,degraded
+performance caused by attention dilution, and hallucinations (Hsieh et al., 2024; Kuratov et al.,
+2024; Liu et al., 2025). Retrieval-Augmented Generation (RAG) is one of the most widely used
+techniquestoaddresstheseissues(Yuetal.,2024).
+RAGworksbyextractingonlythemostrelevantpartsfromalargeexternalcorpusorcontext,suchas
+newlyaddedknowledgeorlengthytexts. ThisallowsLLMstooperateonshorterandmorefocused
+inputs,improvingefficiencyandoutputquality. MostcurrentRAGmethodsrelyonsingle-stepre-
+trieval. ThissetupperformswellinrelativelysimpletaskslikeNeedle-in-a-Haystack(Hsiehetal.,
+2024). Still, more complex problems require multi-step interaction with the context. Multi-step
+retrievalcanbeviewedasaformofsearch-basedreasoning. Thereareseveralexistingapproaches
+tomulti-stepretrievalreasoning. Onedirectioninvolvesconstructingaknowledgegraphfromthe
+retrieved information (Ma et al., 2025; Li et al., 2024). These methods are often slow at infer-
+ence time, since the LLM must process the entire context to build the graph for each new input.
+AnotherlineofworkusesLLMagents,whichinterleaveRAGquerieswithLLM-generatedinstruc-
+tions(Singhetal.,2025;Anokhinetal.,2024). Thesesystemsaresensitivetonoisyorinaccurate
+retrieved passages, which may disrupt the generation of future queries. This shows the need for
+jointoptimizationoftheretrievalandgenerationcomponents. Recently,methodshaveemergedthat
+fine-tuneLLMstointeractmoreeffectivelywithretrievaltools (Songetal.,2025;Jinetal.,2025;
+Chen et al., 2025). These methods tend to perform better, but they require expensive fine-tuning
+1
+6202
+yaM
+4
+]GL.sc[
+2v82370.1152:viXra
+===== PAGE 2 =====
+PublishedasaconferencepaperatICLR2026
+of the LLM itself. This makes them impractical for large models and limits accessibility for most
+researchersandpractitioners.
+Inthiswork,wefocusondevelopingaresource-efficientmulti-stepRAGapproachusingreinforce-
+mentlearning. Insteadoffine-tuninganLLM,wetrainanagentthatperformsretrievaldirectlyin
+the latent space of text chunk embeddings. This allows us to learn a compact and efficient model
+usingvalue-basedRLmethods.
+Our approach achieves state-of-the-art results on long-context commonsense reasoning, multi-hop
+QA,andNIAHtaskswithcontextsupto10milliontokens. Italsoperformscompetitivelyonopen-
+domainQAbenchmarkssuchasMuSiQueandHotPotQA(Yangetal.,2018;Trivedietal.,2022),
+whilebeingsignificantlyfasterandcheapertotrainandruncomparedtoexistingmulti-stepRAG
+methods. Ourcontributionsarethefollowing:
+• Weproposeanewmethodfortrainingamulti-stepretrievalagentusingtemporaldifference
+reinforcementlearning.
+• Weachievestate-of-the-artresultsonbenchmarksthatrequirecommonsensereasoningand
+NIAHtasksoverultra-longcontexts(upto10Mtokens).
+• Weintroduceanewwaytoincorporatetemporalinformationintothemulti-stepembedder,
+enablingtemporalreasoningduringretrieval. Ourtemporalreasoningmechanismgeneral-
+izeswelltolongcontextsatinferencetime.
+2 RELATED WORK
+Thereareseveralmaindirectionsfortacklingcomplexretrievalscenariosonlong-contexttasks.
+A highly popular approach involves building fine-tuning-free LLM Agents that combine off-the-
+shelfretrieverswithLLMs,suchasSearch-o1(Lietal.,2025).Manyoftheseworksfurtherenhance
+retrieval quality by constructing large knowledge graphs over the context, which, while requiring
+little additional training, are extremely slow at inference due to the need for LLMs to process the
+entire context, e.g. GraphReader (Li et al., 2024), HippoRAG (Jimenez Gutierrez et al., 2024),
+AriGraph(Anokhinetal.,2024).
+Anotherlineofworkfine-tunesLRMstoperformmulti-stepretrieval,allowingthemodeltogener-
+ateintermediatesearchqueriesinsidethereasoningforlongcontexts. Thefirstworktoapplythis
+idea was IM-RAG (Yang et al., 2024), which fine-tuned the LLM with a frozen embedder using
+PPO(Schulmanetal.,2017). Morerecentpapers,suchasR1-Searcher(Songetal.,2025),Search-
+R1(Jinetal.,2025), RAG-RL(Huangetal.,2025), andReSearcher(Chenetal.,2025), extended
+this direction by employing GRPO (Shao et al., 2024) for the task. Unlike these methods, which
+freezetheembedderandfine-tunetheLLM,ourapproachfine-tunesonlytheembedder,allowingit
+to pair with LLMs of any size, including proprietary ones, while keeping fine-tuning efficient and
+inexpensive.
+A different approach is to fine-tune the retriever itself using feedback from the LLM, as in Re-
+Plug(Shietal.,2024). Thisdirectionismostsimilartoours,butRePlugdidnotaddressmulti-step
+reasoningorusereinforcementlearninginthissetting. BeamRetriever(Zhangetal.,2024)achieves
+state-of-the-art results on short-context QA by training a reranker for BeamSearch-style planning.
+Incontrast,Q-RAGtrainstheembedderwithreinforcementlearning,enablingfasterinferenceand
+better scalability to long contexts through efficient vector similarity instead of transformer-based
+trajectoryscoring.
+Extremely long-sequence processing is demonstrated by models that combine recurrence with the
+Transformerarchitecture. TheMambafamilyofstatespacemodels(Gu&Dao,2024)replacesat-
+tentionwithstructuredrecurrentdynamics,offeringlinear-timescalabilityandstrongperformance
+onlongsequences,thoughoftenatthecostofweakerin-contextlearningandlessexpressivetoken-
+to-token interaction compared to Transformer-based architectures. The Recurrent Memory Trans-
+former(RMT)(Bulatovetal.,2022)introducessegment-levelrecurrencebypassingmemorytokens
+betweenfixed-sizesegments,enablingQ&Aonsequencesupto10Mtokens. Titans(Behrouzetal.,
+2024)framesrecurrentmemorytrainingasameta-learningproblemandusessurprisetoprioritize
+information that should be retained over very long contexts, showing scaling beyond 2M tokens.
+2
+===== PAGE 3 =====
+PublishedasaconferencepaperatICLR2026
+Relatedly,MemUP(Sorokinetal.,2022)useduncertaintytoidentifyeventsthatrequirelong-term
+memory in recurrent models. Similar to Titans, ATLAS (Behrouz et al., 2025) increases memory
+capacity, achieving better long-context performance than both RMT and Titans. The Associative
+RecurrentMemoryTransformer(ARMT)(Rodkinetal.,2024)employsquasi-linear,associativeat-
+tentionineachlayerandattainsthebestlong-contextscoresamongrecurrentmodels. Ourapproach
+outperformsallofthesemodelsoncontextsbeyond1Mtokenswhilebelongingtoadifferentclass
+ofmethods.
+LongRoPE2(Shangetal.,2025)tacklesthepositionalencodingbottleneck,extendingtheeffective
+context window of pre-trained LLMs to 128K tokens while retaining short-context performance
+throughRoPErescalingandmixed-windowtraining.
+3 METHODS
+Q-RAG Agent
+Q values
+State Embedder
+Action Embedder
+la .. t . e J o a h t n th s e t a o y f e fic d e ... .. s .H to h e p o b p m r e e ie d . f . l . b y y so m p h h e e a b th r o m in u a g g c h a y t . t . . the . t . w .t e h n a t a t y , c h m a e i f n é s u . p . t . e e n s t at pla h O c is u e t , k s e h id y e e s r e h w a is e l i r z e e d ne o . i . v g . e H h r b e n o i s g r t ? h a s t y p a e l t a d h c i e s . ..
+Question: Where
+reward fo c r o g u o l t d te J n o h h i n s h k a e v y e s?
+function /
+critic Answer: cafe,
+pharmacy
+Environment
+.
+.
+.
+...that, he spent
+twenty minutes at a
+café...
+Long-Context Document
+Next
+timestep
+Figure1:Q-RAGagentinteractswithmulti-stepretrievalenvironment.Thestartingstates contains
+0
+theinitialqueryq. Atthestartoftheepisode, theagentembedsallchunksofthelongcontextC.
+At each step t, the agent computes a vector embedding of the current state s , which includes q
+t
+andallpreviouslyselectedchunks. Foreverychunkci ∈ A ,theutilityofretrievingitisevaluated
+t
+by the Q-function Q (s ,a = ci). The policy π selects the next chunk from A with probability
+θ t θ t
+proportionaltoitsQ (s ,ci)value.
+θ t
+3.1 PRELIMINARIES
+Let D be a dataset of triples (C,q,y), where C is a long context, q is an initial query, and y is
+the gold answer. The query q can be either a user question about C or a generated claim whose
+factuality or consistency with earlier parts of C must be verified. We assume C is pre-segmented
+intonon-overlapping1 textchunksC={c(i)}m indocumentorder. Theagent’sgoalistoidentify
+i=1
+theinformationinCthatismissingfromqbutnecessarytoproducethecorrectanswery.Wemodel
+multi-step retrieval as a finite-horizon Markov Decision Process, or MDP (S,A,p,r,γ), where A
+istheactionspace, Sisthestatespace, r istherewardfunction, pisthe(deterministic)transition
+function, and γ ∈ [0,1] is the discount factor. At step t = 0, the action set is A = C, where
+0
+an action a ∈ A selects one chunk. At later steps, previously selected chunks are removed so
+t t
+A =C\{a ,...,a }. Superscriptsindicatedocumentpositionsandsubscriptsindicateepisode
+t 0 t−1
+timesteps.Thenotationai(equivalentlyc(i))denotesthechunk/actionatpositioniinthedocument;
+selectingthechunkwithindexiatsteptiswrittenai. Symbolscandaareusedinterchangeably,
+t
+dependingoncontext.
+Statesareorderedliststhatalwaysbeginwiththequery,s = ord([q,a ,...,a ]),whereord(·)
+t 0 t−1
+sortsbytheoriginaldocumentordertoavoidpermutationambiguity;theinitialstatecontainsonly
+1Chunkoverlappingmaycomplicatetheexplanationbutdoesnotaffectourproposedsolution.
+3
+===== PAGE 4 =====
+PublishedasaconferencepaperatICLR2026
+thequery,s =[q].Transitionsaredeterministic,p(s ,a )=ord([q,a ,...,a ,a ]).Anepisode
+0 t t 0 t−1 t
+terminateseitherwhenastepbudgetT isreachedorwhenaspecialSTOPactionistaken.
+When supervision provides a set of support facts F⋆ ⊆ C, we use a sparse terminal reward: the
+reward is 0 at all intermediate steps, and at the end of the episode it is 1 if all support facts are
+included in the final state (otherwise 0). When only answer supervision is available, one could
+insteaduseanLLMtogenerateyˆfromthefinalstateanddefineaterminalrewardviaananswer-
+quality metric (e.g., exact match or F1). In this work we do not pursue LLM-based rewards; all
+reportedexperimentsrelyonthesupport-factsignal,andexploringLLM-basedrewarddesignisleft
+forfuturework.
+3.2 VALUE-BASEDRLFOREMBEDDERFINE-TUNING
+Actionselectioninmulti-stepretrievalisperformedbyavalue-basedagent.Specifically,maximum-
+entropy reinforcement learning (Ziebart, 2010; Haarnoja et al., 2018) is adopted together with the
+correspondingdefinitionsofthesoftQπ andVπ valuefunctionsforapolicyπ:
+Qπ(s,a)=r(s,a)+γVπ(s′ =p(s,a)) (1)
+Vπ(s)=E [Qπ(s,a)−αlogπ(a|s)] (2)
+a∼π(·|s)
+Here, α > 0 is a temperature that controls the strength of exploration. This choice is primarily
+motivatedbytheneedforeffectiveexplorationinthelong-contextmulti-stepretrievalenvironment.
+In Q-RAG, the Q-function is approximated using two embedders for states and actions. The state
+embedder E (s ;θ ) ∈ Rd produces a vector embedding for the current state s , while the action
+s t 1 t
+embedder E (ai,i;θ ) ∈ Rd employs rotary position embeddings to encode both the candidate
+a 2
+chunkcontentanditsdocument-positionindexi. Qvaluesarethenestimatedbyaninnerproduct
+betweentwoembeddings: Q (s,ai)=⟨E (s;θ ),E (ai,i;θ )⟩. Thisfactorizationistheoretically
+θ s 1 a 2
+grounded; we derive its convergence guarantees with explicit rates in Appendix A. Given Q , the
+θ
+chunkselectionprobabilityiscomputedusingaBoltzmannpolicy:
+exp 1 (Q (s ,a )−q)
+π(a |s )= α θ t t (3)
+t t (cid:80) exp 1(Q (s ,a)−q)
+a∈At α θ t
+withq =max Q (s ,a)andtemperatureαannealedfromaninitialvaluetozeroduringtrain-
+a∈At θ t
+ing(proportionallytothelearningrate).
+As the backbone Temporal Difference learning algorithm, we adopt the recent PQN method by
+Gallicietal.. ComparedtoDQN(Mnihetal.,2015),PQNremovestheneedforareplaybuffer. In
+oursettingwithalargenumberofchunks,areplaybufferwouldrequirere-embeddingalldocument
+chunksforeachsampledrawnfromthereplaybuffertoestimateV/Qvaluesforsubsequentstates
+s . Thissignificantlyslowsthetrainingprocessandincreasesmemoryrequirements. UsingPQN
+t+1
+enables an on-policy value-based training that avoids these costs. The key departures in Q-RAG,
+relative to the original PQN backbone, are the use of soft value functions and target networks.
+AblationresultsdemonstratingthebenefitofthesechoicesarereportedinSection5.
+As the training target, rather than the one-step return (see r.h.s. in Eq. 1), a λ-return is used to
+improvestabilityandlearningspeed:
+T−t−1
+(cid:88)
+Gλ =(1−λ) λn−1G + λT−t−1G ,
+t t:t+n t
+n=1
+whereG = (cid:80)n γk−1r +V (s ). Theapproximationofthestatevaluefunctioncan
+t:t+n k=1 t+k θ′ t+n
+becomputedfromQvaluesinthecaseofdiscreteactions:
+(cid:18) (cid:19)
+V (s )=αlog (cid:88) exp Q θ′ (s t ,a) (4)
+θ′ t α
+a∈At
+Hereθ′ denotesslowlyupdatedtargetnetworkparameters. Themodelparametersθ arefine-tuned
+tominimizethemeansquarederrortotheλ-returns:
+L =E[(Q (s ,a )−Gλ)2] (5)
+Q θ t t t
+TheQ-RAGpseudocodeispresentedinAlgorithm1.
+4
+===== PAGE 5 =====
+PublishedasaconferencepaperatICLR2026
+Algorithm1Q-RAG
+1: Hyperparameters:
+2: NumberofenvironmentsK,retrievalstepsT,temperatureα,TDparameterλ,EMAτ.
+3: Initialize:
+4: StateembedderE s (s;θ 1 )
+5: ActionembedderE a (ai,i;θ 2 )withpositioni
+6: CriticQ θ (s,ai)=E s (s;θ 1 )TE a (ai,i;θ 2 )
+7: CritictargetQ θ′ (s,ai)
+8: procedureCOMPUTETARGETS({s t ,a t ,r t ,v t }T t= + 1 1)
+9: Initializeλ-returnsG T =r T +γv T+1
+10: fort=T −1downto1do
+(cid:2) (cid:3)
+11: G t =r t +γ (1−λ)v t+1 +λG t+1
+12: endfor
+13: return{G t }T t=1
+14: endprocedure
+15: Training(oneupdatestep)
+16: forenvk ∈1,...,K inparalleldo
+17: s 1 ,A 1 =ResetQueryAndContext()
+18: ComputeE a =E a (A;θ)andE a ′ =E a (A;θ′)
+19: forstept∈1,...,T +1do
+2 2 1 0 : : v a t t = ∼ α so l f o tm g (cid:80) ax a a ∈ ∈ A A t e α 1 x E p s α 1 (s E ; s θ ( ) s T ; E θ′ a )TE a ′
+22: r t =ComputeReward(s t ,a t )
+23: s t+1 =concatenate(s t ,a t )
+24: A t+1 =A t \{a t }
+25: endfor
+26: B ={s t ,a t ,r t ,v t }T t= + 1 1
+27: {Gk}T =ComputeTargets(B)
+t t=1
+28: endfor
+29: ∇L Q = T 1 K (cid:80)K k=1 (cid:80)T t=1 ∇ θ (Q θ (sk t ,ak t )−Gk t )2
+30: Updateθusing∇L Q
+31: Updatetargetparameters: θ′ ←τθ+(1−τ)θ′
+3.3 TEMPORALREASONINGFORLONG-CONTEXTSEARCH
+When dealing with narrative text, the information contained in a text chunk c may be insufficient
+to determine whether c helps us answer the question q. For example, we may need to know what
+happenedbeforesomespecificevent. Astandardretrievercanfindseveralrelevanttextchunksthat
+specifythecharacter’slocation,butchoosingthecorrectonecanbeimpossiblewithouttakinginto
+accounttemporalinformation. Toaddressthis,weproposearelativepositionalencodingofchunks
+that explicitly encodes their position with respect to the facts already extracted into the state. At
+stept,letS ={i <···<i }bethe(sorted)documentindicesofselectedchunksandA theset
+t 1 k t
+of availableactions. Theindices in S partition thedocument into k+1 disjoint intervals: “before
+t
+theearliestselectedfact”,“betweenconsecutiveselectedfacts”,and“afterthelatestselectedfact.”
+Therelativepositionalmappingρ : N → R+ assignstoeveryoriginalchunkindexareal-valued
+t
+indexthat(i)identifiestheintervalitbelongstoand(ii)preservestherelativeorderbetweenchunks.
+Thismappingmakesexplicitbetweenwhichextractedfactsachunklies,whileremaininginvariant
+toglobalshiftsofabsolutepositions.
+Formally, theintervalboundariesaredefinedasb =1, b =i forj=1:k, andb =m+1forC =
+0 j j k+1
+{c(i)}m . Tocomputerelativeindexρ (i)forachunkci,findtheuniquej suchthatb ≤i<b
+i=1 t j j+1
+andset
+i−b
+ρ (i) = jδ + ℓ j , (6)
+t b −b
+j+1 j
+where δ > 0 is the inter-interval step and ℓ ∈ (0,δ) controls the within-interval resolution (e.g.,
+δ=10, ℓ=9 in our experiments). In the action embedder, the absolute position is replaced by the
+5
+===== PAGE 6 =====
+PublishedasaconferencepaperatICLR2026
+relativeone,
+E (cid:0) ai, i;θ (cid:1) ⇒ E (cid:0) ai, ρ (i);θ (cid:1) , (7)
+a 2 a t 2
+whichallowstheQ-functiontoexploitthespatialrelationofcandidatestoalreadyretrievedevidence
+while retaining local order within each interval. This design allows the retrieval agent to perform
+stronglynotonlyonfact-findingoverdisjointdocumentcollections,butalsoonlong-formnarrative
+tasks,enablingQ-RAGtocompetewithrecurrenttransformers (Bulatovetal.,2022;Rodkinetal.,
+2024;Behrouzetal.,2025;2024)andotherlong-contextapproaches.
+4 EXPERIMENTS
+4.1 EXPERIMENTALSETUP
+Weevaluateourapproach,Q-RAG,ontasksthatcovercommonsensereasoning,temporalreasoning,
+asetofNeedle-in-a-Haystacktasksandopen-domainmulti-hopquestionansweringtasksoncontext
+lengths that range from 4k tokens to 10M tokens per sample. For commonsence and temporal
+reasoningweuseBabiLongbenchmark(Kuratovetal.,2024),forNeedle-in-a-Haystack,weusethe
+RULERbenchmark(Hsiehetal.,2024). Foropen-domainmulti-hopQAweuseHotPotQA(Yang
+et al., 2018), MuSiQue (Trivedi et al., 2022) and RULER benchmarks. BabiLong and RULER
+requirelongcontexts. MuSiQueandHotPotQAuseshortcontexts.
+Baselines differ by task. Computing a uniform set of baselines across all datasets is difficult and
+time-consuming. Manymethodsdonotreleasecode. Somemethodswereevaluatedonlyonsome
+of these datasets. Even when the tasks match, the experimental settings often differ for the same
+benchmarks.Somebaselinesprovidecodebutrequireheavyresources,forexampleatleast8×A100
+GPUs(Jinetal.,2025;Songetal.,2025;Huangetal.,2025))tofine-tune,whichareunavailableto
+us. Therefore,wereportthreetypesofbaselines,andwemarkeachbaselineintablesaccordingly:
+• ×Ablation: baselinesthattesttheeffectivenessofourproposedmodifications.
+• ✓ Reproduced: baselines that we fine-tuned and/or evaluated on our datasets using re-
+leasedcodeorpubliclyavailablecheckpoints.
+• ◦Reported: baselineswhosescoreswetakedirectlyfromtheoriginalpapers.
+4.2 COMMONSENSEREASONINGONULTRA-LONGCONTEXTS
+OntheBabiLong(Kuratovetal.,2024)benchmark,wecomparedourmethodwiththestate-of-the-
+art long-context processing approaches, including Titans (Behrouz et al., 2024), Atlas (Behrouz
+et al., 2025), ARMT (Rodkin et al., 2024), RMT (Bulatov et al., 2022), as well as proprietary
+LLMs and LLM-based agents. The results for most of these baselines were taken directly from
+the respective original papers. As shown in Figure 2a, our approach achieves the highest average
+(a) (b)
+Figure 2: Comparison of answer accuracy on the long-context benchmark BabiLong. Solid lines
+denotemethodsfine-tunedonBabiLong,whiledashedlinesdenotezero-shotmethods. a)Average
+performance across tasks Q1–QA5. b) Performance on the hardest task, QA3, which requires the
+longestreasoningchainandtemporalawareness.
+6
+===== PAGE 7 =====
+PublishedasaconferencepaperatICLR2026
+performanceonBabiLonginultra-longcontextsrangingfrom1to10milliontokens,demonstrating
+superiorgeneralizationtolongcontextscomparedtootherspecializedlong-contextmethods.
+In Figure 2b, we present separate results for the QA3 subtask, which is the hardest subtask in the
+BabiLongbenchmark,itrequiresmulti-stepsearchofatleastthreedifferentfactsandtemporalrea-
+soning. ExperimentalresultsshowthatthemajorityofmodelsperformworstontheQA3subtask.
+Astheresultsindicate,alternativelong-contextapproachesshowevengreaterperformancedegrada-
+tiononthistaskwithincreasingcontextlength. Incontrast,Q-RAGshowsvirtuallynodegradation,
+withthelargestperformancegapoverallbaselinesobservedonthismostchallengingsubtask. We
+additionallyfine-tunedtheBeamRetrieverbaselinespecificallyontheQA3subtask,givenitsstrong
+performanceonopen-domainQAdatasets. However,thismethodfailedtosolvethetask. Notethat
+some methods, such as Titans (Behrouz et al., 2024) and Atlas (Behrouz et al., 2025), are absent
+fromthefigureastheydidnotreportdetailedbreakdownsbysubtask.
+4.3 NEEDLE-IN-A-HAYSTACKANDLONGCONTEXTQA
+While reasoning tasks are crucial for evaluating advanced retrieval systems, a substantial portion
+of real-world applications reduces to Needle-in-a-Haystack (NIAH) problems, making it equally
+importantthatmodelsdeliverconsistentlystrongperformanceonthesetasks. RULERisadataset
+that includes many long-context tasks. Most of these tasks follow the NIAH formulation. The
+NIAHsetupevaluatestheabilitytoretrieveaspecific“needle”fromalongdistracting“haystack”.
+For the RULER benchmark, we use Beam Retriever (Zhang et al., 2024), Titans (Behrouz et al.,
+2024),Atlas(Behrouzetal.,2025),Mamba2 (Waleffeetal.,2024),andLongRoPE2(Shangetal.,
+2025) as baselines. Titans and Atlas are recurrent transformers. Mamba2 is a state space model
+(SSM)thatcombinestransformercomponentswithSSM.LongRoPE2isamethodforextendingthe
+Table 1: Results on the RULER benchmark, evaluating long-context retrieval performance across
+variouscontextlengths. S(Single-needle): Findonevalueforonekey. MK(Multi-keys): Findone
+valueforonekeyamongmany. MV(Multi-values):Findallvaluesforonekey. MQ(Multi-query):
+Answermultiplequestionsoverthecontext. MHQA:open-domainmulti-hopquestionanswering.
+SHQA:single-hopquestionanswering.
+S MK NIAH QA
+Len Methods MV MQ
+Avg.
+1st 2nd 3rd 1st 2nd 3rd SH MH
+◦Titans 98.4 99.8 89.4 n/a n/a n/a n/a n/a n/a n/a n/a
+◦Atlas 99.2 100 90.6 n/a n/a n/a n/a n/a n/a n/a n/a
+◦Mamba2-Hybrid 100 100 95.7 89.5 95.5 96 97.9 97.6 96.5 56.5 48.8
+4K
+◦LongRoPE2-8B 100 100 99 100 100 100 99 99.7 99.7 79 60
+✓BeamRetriever 100 100 98 98 98 97 98 99 98.5 29.0 39.0
+Q-RAG 100 100 100 100 100 100 100 100 100 62 67
+◦Titans 96.2 80.2 n/a n/a n/a n/a n/a n/a n/a n/a n/a
+◦Atlas 97 84 n/a n/a n/a n/a n/a n/a n/a n/a n/a
+◦Mamba2-Hybrid 100 100 81.5 92 92.2 83 89.8 90.2 91.1 48.8 44
+16K
+◦LongRoPE2-8B 100 100 100 99 100 98 95 98.2 98.8 69 58
+✓BeamRetriever 100 100 97 96.5 96 95 80 98 95.3 24.0 35.0
+Q-RAG 100 100 100 100 100 100 100 100 100 59 64
+◦Mamba2-Hybrid 100 100 96.7 84 76.5 81.5 84.3 80.9 88.0 41.8 38.5
+32K ◦LongRoPE2-8B 100 100 100 99 98 100 98 96.2 98.9 72 55
+Q-RAG 100 100 100 100 100 100 100 100 100 59 65
+◦LongRoPE2-8B 100 100 99 96 91 94 96.5 97 96.7 56 50
+128K
+Q-RAG 100 100 100 100 100 100 100 100 100 55 65
+1M Q-RAG 100 100 100 100 98.5 99.0 100 100 99.7 52 61
+7
+===== PAGE 8 =====
+PublishedasaconferencepaperatICLR2026
+effectivecontextwindowofLLMs. Allmethodswerefine-tunedeitherdirectlyonRULER(Titans,
+Atlas, Mamba2, Beam Retriever) or on related synthetic NIAH-style datasets (LongRoPE2). Q-
+RAGwas alsofine-tuned onthe NIAHsubtasks. Forthe Multi-hopQA RULERsubtask, Q-RAG
+andBeamRetrieverwerefine-tunedonHotPotQAandevaluatedontheMulti-hopQAsubtaskout-
+of-distribution.
+TheresultsareshowninTable1. Q-RAGachievesnear-perfectperformanceonallNIAHsubtasks.
+TheQ-RAGembedderwastrainedon4K-lengthdocumentsandgeneralizestocontextlengthsupto
+1Mtokenswithoutlossofaccuracy. OntheMulti-hopQAsubtask,Q-RAGshowssignificantlybet-
+terresultsthanallourbaselinesatallcontextlengthsweconsider.Somedegradationwithincreasing
+contextlengthbeginsonlyat1Mtokens.
+4.4 OPEN-DOMAINQUESTIONANSWERING
+For our experiments on the HotPotQA and MuSiQue datasets, we compared our method against
+several strong baselines. The first baseline is Beam Retriever, which enables multi-step retrieval
+by training a model to score sequences of retrieved chunks. During evaluation, Beam Retriever is
+giventheoraclenumberofsupportingfacts(i.e., thegoldhopcount)andalwaysretrievesexactly
+that many facts. Although this approach is slower than traditional retrieval methods and does not
+scale well to longer contexts, it achieves state-of-the-art results on HotPotQA. Another baseline
+weconsideredisSearchR1,arecentmethodfromafamilyofapproachesthattraintheLLMitself
+to compose text queries for multi-step retrieval. Additionally, we evaluated the performance of
+LLM-agent-based methods, including GraphReader. Q-RAG and Beam Retriever were fine-tuned
+on HotPotQA and evaluated on MuSiQue for out-of-distribution testing. Baseline numbers were
+takendirectlyfromthecorrespondingpapers. Missingentriesindicatemetricsnotreportedbythe
+originalauthors.
+ThecomparisonresultsarepresentedinTable2. Ourmethodachievesfactretrievalaccuracyonpar
+withBeamRetriever, surpassesallotherbaselinesonHotPotQA,andmatchestheperformanceof
+full-LLM-tuningSearch-R1whileoutperformingallalternativesontheout-of-distributionMuSiQue
+dataset,resultinginthebestoverallperformanceacrossbenchmarks.ResultsalsoincludeanotherQ-
+RAGversionPlanQ-RAGthatcombinestheQ-RAGvaluefunctionandbeamsearchbasedplanning
+(seeAppendixC).PlanQ-RAGshowedsimilarperformancetovanillaQ-RAG.Forbothmethods
+involving retrieval mechanism fine-tuning (Q-RAG and Beam Retriever), we used the QwQ-32B
+modeltoproducethefinalanswer.
+Table2: ComparisonofmethodsonHotPotQAandMuSiQuebenchmarks. Boldtextandunderline
+denotethebestandsecondbestscoresrespectively.
+HotPotQA MuSiQue(OOD) Avg
+Methods FactF1 FactEM AnsF1 AnsEM FactF1 FactEM AnsF1 AnsEM AnsF1 AnsEM
+Fine-tunedonHotPotQA
+PlanQ-RAG 0.95 0.91 0.76 0.60 0.69 0.53 0.51 0.36 0.64 0.48
+Q-RAG 0.93 0.89 0.76 0.59 0.71 0.55 0.52 0.37 0.64 0.48
+✓BeamRetriever 0.97 0.94 0.77 0.61 0.61 0.36 0.40 0.27 0.59 0.44
+✓Search-r1 0.81 0.66 0.65 0.52 0.71 0.55 0.51 0.39 0.58 0.46
+◦RAG-RL 0.82 – 0.69 – 0.65 – 0.47 – 0.58 –
+×Multi-stepRAGw.o.FT 0.73 0.54 0.65 0.50 0.51 0.30 0.40 0.27 0.53 0.39
+Zero-shotmethods
+✓GraphReader – – 0.46 0.24 – – 0.40 0.20 0.43 0.22
+✓Single-stepRAG – – 0.53 0.39 – – 0.28 0.17 0.41 0.28
+5 ABLATION STUDY
+To assess the impact of the architectural choices in Q-RAG, an ablation study was conducted on
+the BabiLong-QA3 task. This benchmark was selected because it is among the most challenging
+8
+===== PAGE 9 =====
+PublishedasaconferencepaperatICLR2026
+0.96
+0.94
+0.92
+0.9
+0.88
+0.86
+0.00 0.01 0.02 0.03 0.04 0.05
+Temperature parameter
+nruter
+egarevA
+0.98
+0.97
+0.96
+0.95
+0.94
+QA2 QA3 0.93
+0.4 0.5 0.6 0.7 0.8
+TD parameter
+(a)
+nruter
+egarevA
+QA2 QA3
+(b) (c)
+Figure 3: Ablation for (a) policy entropy coefficient (α) in soft Q function and (b) for λ-return
+parameter. Inferenceruntimecomparison(c),contextlengthintokensonthex-axes.
+long-context tasks used in the experiments and it supports evaluation at arbitrary context lengths.
+ThefollowingbaselineswerecomparedagainstQ-RAG:
+Multi-step RAG w.o. FT. This baseline reproduces the full Q-RAG retrieval pipeline and uses
+the same state and action embedders, but relies on their original pretrained weights without any
+reinforcement learning fine-tuning. This setting tests whether RL fine-tuning of the embedders is
+beneficialformulti-stepretrievalquality.
+Multi-stepRAGw. SFT. Thisbaselineappliessupervisedfine-tuningusingground-truthsupport
+factsassupervision.ThelossfollowstheobjectiveusedinBeamRetrieverfortrajectorysupervision,
+adaptedtothemulti-stepretrievalsetting. ThissettingisolatestheeffectofRLbycomparingitto
+supervisedlearningonthesamesupervisionsignal.
+Q-RAG w.o. target. This variant removes target networks from the PQN-based value learning,
+followingtheoriginalPQNrecipewithouttargetparameters. Itmeasuresthecontributionoftarget
+networkstostabilityandperformanceintheQ-RAGtrainingloop.
+Q-RAGw.o. Soft-Q. Thisvariantreplacesthemaximum-entropy(soft)valuefunctionswithstan-
+dard(non-entropy-regularized)Q-learningobjectives. Itevaluatestheeffectofentropyregulariza-
+tionandthesoftvalueformulationonretrievalperformance.
+Allbaselineswereevaluatedwiththreerandomseeds. Table3reportsresultsacrossmultiplecon-
+text lengths on QA3. Figure 3 shows the sensitivity of Q-RAG to the λ-return parameter and the
+temperatureα(thestrengthofentropyregularization)onQA2andQA3.
+Table3:AblationresultsonBabiLongQA3.TheTableshowsF1scoreforsupportingfactsretrieval.
+Allvaluesareaveragedover3runswithdifferentseeds.
+Method 1K 4K 32K 128K 1M
+Q-RAG 97.8±0.17 97.4±0.14 97.1±0.08 96.8±0.08 96.5±0.16
+×Q-RAGw.o.Soft-Q 95.9±0.70 95.5±0.80 94.5±0.50 94.0±0.30 93.3±0.45
+×Q-RAGw.o.Target 79.2±26.0 78.1±26.6 77.6±27.2 77.4±27.3 75.9±28.2
+×Multi-StepRAGw.SFT 20.33±0.32 20.87±0.35 20.10±0.20 18.30±0.36 —
+×Multi-StepRAGw.o.FT 15.52±0.11 16.38±0.10 15.51±0.16 15.34±0.12 —
+5.1 SENSITIVITYTORETRIEVALBUDGET
+WeinvestigatethedependenceoffinalmodelperformanceonthenumberofQ-RAGretrievalsteps
+(i.e., the retrieval budget). For this analysis, we used a Q-RAG system with an Alibaba-NLP/gte-
+multilingual-base embedder, trained on a combination of the HotPotQA and MuSiQue datasets.
+Thisembeddersupportscontextsofupto8192tokens,enablingtheuseofalargerretrievalbudget.
+Weevaluatedthesystemon1000samplesfromtheHotPotQAdataset. Thefinalgenerationofthe
+answerswasperformedbythreeLLMs: Qwen3-4B,Qwen3-14B,andQwen3-32B.
+9
+===== PAGE 10 =====
+PublishedasaconferencepaperatICLR2026
+Table4:Sensitivitytothenumberofretrievalsteps. Dataset:HotPotQA(1000samples). Embedder
+Alibaba-NLP/gte-multilingual-basewastrainedonHotPotQA+MuSiQue.
+Facts Qwen3-4B Qwen3-14B Qwen3-32B
+Retrievals
+EM F1 EM F1 EM F1 EM F1
+2 0.832 0.903 0.439 0.620 0.556 0.708 0.504 0.675
+3 0.935 0.771 0.481 0.657 0.570 0.730 0.510 0.692
+4 0.962 0.652 0.493 0.664 0.577 0.734 0.513 0.695
+5 0.978 0.565 0.481 0.656 0.584 0.744 0.512 0.692
+The results are presented in Table4. Here, EM (Exact Match) indicates the number of correct
+(ground-truth supporting) chunks retrieved, while F1 accounts for the inclusion of noise (non-
+supporting) chunks. The table shows that increasing the number of retrieval steps from 2 to 3
+improvesboththenumberofcorrectfactsretrievedandtheanswerqualityacrossallthreeLLMs.
+Theseexperimentssuggestthat,withinareasonablerangeofretrievalcounts,finalansweraccuracy
+isprimarilydependentontheretrievalofcorrectchunksandisnotdegradedbythepresenceofnoise
+chunks.
+Inadditiontothefixed-budgetsetting,wealsostudiedanalternativestoppingcriterioninwhichthe
+agentstopsdynamicallyaccordingtoaQ-valuethreshold. AdetailedanalysisofthisQ-value-based
+earlystoppingispresentedinAppendixB.
+6 CONCLUSION
+This work introduced Q-RAG, a resource-efficient method for multi-step retrieval trained with re-
+inforcement learning directly in the latent space of text-chunk embeddings. Across long-context
+benchmarks (e.g., BabiLong, RULER) and open-domain QA datasets (e.g., MuSiQue, HotPotQA),
+Q-RAGattainsstate-of-the-artorhighlycompetitiveresults. Itsadvantageoverbaselineswidensas
+contextlengthgrows,andperformanceshowsminimaldegradationevenatultra-longscales.
+A key practical benefit is compute efficiency: all training was performed on a single A100 GPU
+with80GBmemory,whereasrecentRL-basedmulti-stepretrieverssuchasSearch-R1/R1-Searcher
+typicallyreporttrainingonclustersofabouteightA100GPUs. Byfine-tuningonlytheembedder
+whilekeepingtheLLMfrozen,Q-RAGremainseasytopairwithpowerfulpre-trainedorproprietary
+LLMs,enablingefficienttraining,flexibledeployment,andstrongretrievaloververylongcontexts.
+Looking ahead, promising directions include using structured LLM feedback as a reward signal,
+strengtheningcompositionalandtemporalreasoningdirectlyintheembeddingspace,andexploring
+tighterintegrationwithgenerationwhilepreservingthemethod’sefficiencyandscalability.
+REPRODUCIBILITYSTATEMENT.
+The main results of this paper can be reproduced using the code available in the GitHub reposi-
+tory,whichincludesdataandinstructionsforrunningexperimentsonallbenchmarks: BABILong,
+HotPotQA, MuSiQue, and RULER. Pretrained Q-RAG checkpoints are available in the Hugging
+Facerepository. Onlypubliclyavailableembeddersarefine-tuned:multilingual-e5-large,
+Alibaba-NLP/gte-multilingual-base, and facebook/contriever. The hyperpa-
+rametersandtrainingschedulesareprovidedinthecodeandinAppendixF.AsingleNVIDIAA100
+TensorCoreGPUwith80GBofmemoryissufficienttoreproduceallQ-RAGexperiments.
+ACKNOWLEDGMENTS
+The work was partially supported by the grant for research centers in the field of AI provided by
+theMinistryofEconomicDevelopmentoftheRussianFederationinaccordancewiththeagreement
+000000C313925P4F0002andtheagreement№139-10-2025-033
+10
+===== PAGE 11 =====
+PublishedasaconferencepaperatICLR2026
+REFERENCES
+PetrAnokhin,NikitaSemenov,ArtyomSorokin,DmitryEvseev,AndreyKravchenko,MikhailBurt-
+sev, and Evgeny Burnaev. Arigraph: Learning knowledge graph world models with episodic
+memoryforllmagents. arXivpreprintarXiv:2407.04363,2024.
+AliBehrouz,PeilinZhong,andVahabMirrokni. Titans: Learningtomemorizeattesttime. arXiv
+preprintarXiv:2501.00663,2024.
+AliBehrouz,ZemanLi,PraneethKacham,MajidDaliri,YuanDeng,PeilinZhong,MeisamRaza-
+viyayn, and Vahab Mirrokni. Atlas: Learning to optimally memorize the context at test time.
+arXivpreprintarXiv:2505.23735,2025.
+Aydar Bulatov, Yury Kuratov, and Mikhail Burtsev. Recurrent memory transformer. Advances in
+NeuralInformationProcessingSystems,35:11079–11091,2022.
+MingyangChen,TianpengLi,HaozeSun,YijieZhou,ChenzhengZhu,HaofenWang,JeffZPan,
+WenZhang,HuajunChen,FanYang,etal. Learningtoreasonwithsearchforllmsviareinforce-
+mentlearning. arXivpreprintarXiv:2503.19470,2025.
+Matteo Gallici, Mattie Fellows, Benjamin Ellis, Bartomeu Pou, Ivan Masmitja, Jakob Nicolaus
+Foerster, and Mario Martin. Simplifying deep temporal difference learning. In The Thirteenth
+InternationalConferenceonLearningRepresentations.
+AlbertGuandTriDao. Mamba: Linear-timesequencemodelingwithselectivestatespaces,2024.
+URLhttps://arxiv.org/abs/2312.00752.
+Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu,
+ShirongMa,PeiyiWang,XiaoBi,etal. Deepseek-r1: Incentivizingreasoningcapabilityinllms
+viareinforcementlearning. arXivpreprintarXiv:2501.12948,2025.
+Tuomas Haarnoja, Aurick Zhou, Pieter Abbeel, and Sergey Levine. Soft actor-critic: Off-policy
+maximumentropydeepreinforcementlearning with astochasticactor. In Internationalconfer-
+enceonmachinelearning,pp.1861–1870.Pmlr,2018.
+Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, Yang
+Zhang, and Boris Ginsburg. Ruler: What’s the real context size of your long-context language
+models? arXivpreprintarXiv:2404.06654,2024.
+JerryHuang,SiddarthMadala,RishamSidhu,ChengNiu,HaoPeng,JuliaHockenmaier,andTong
+Zhang. Rag-rl: Advancingretrieval-augmentedgenerationviarlandcurriculumlearning. arXiv
+preprintarXiv:2503.12759,2025.
+BernalJimenezGutierrez,YihengShu,YuGu,MichihiroYasunaga,andYuSu.Hipporag:Neurobi-
+ologicallyinspiredlong-termmemoryforlargelanguagemodels.AdvancesinNeuralInformation
+ProcessingSystems,37:59532–59569,2024.
+BowenJin,HansiZeng,ZhenruiYue,JinsungYoon,SercanArik,DongWang,HamedZamani,and
+JiaweiHan. Search-r1: Trainingllmstoreasonandleveragesearchengineswithreinforcement
+learning. arXivpreprintarXiv:2503.09516,2025.
+Yury Kuratov, Aydar Bulatov, Petr Anokhin, Ivan Rodkin, Dmitry Sorokin, Artyom Sorokin, and
+MikhailBurtsev. Babilong: Testingthelimitsofllmswithlongcontextreasoning-in-a-haystack.
+AdvancesinNeuralInformationProcessingSystems,37:106519–106554,2024.
+ShilongLi, YanchengHe, HangyuGuo, XingyuanBu, GeBai, JieLiu, JiahengLiu, XingweiQu,
+YangguangLi,WanliOuyang,etal. Graphreader: Buildinggraph-basedagenttoenhancelong-
+context abilities of large language models. In Findings of the Association for Computational
+Linguistics: EMNLP2024,pp.12758–12786,2024.
+Xiaoxi Li, Guanting Dong, Jiajie Jin, Yuyao Zhang, Yujia Zhou, Yutao Zhu, Peitian Zhang, and
+Zhicheng Dou. Search-o1: Agentic search-enhanced large reasoning models. arXiv preprint
+arXiv:2501.05366,2025.
+11
+===== PAGE 12 =====
+PublishedasaconferencepaperatICLR2026
+Jiaheng Liu, Dawei Zhu, Zhiqi Bai, Yancheng He, Huanxuan Liao, Haoran Que, Zekun Wang,
+ChenchenZhang, GeZhang, JiebinZhang, etal. Acomprehensivesurveyonlongcontextlan-
+guagemodeling. arXivpreprintarXiv:2503.17407,2025.
+ChuangtaoMa,YongruiChen,TianxingWu,ArijitKhan,andHaofenWang. Largelanguagemod-
+els meet knowledge graphs for question answering: Synthesis and opportunities, 2025. URL
+https://arxiv.org/abs/2505.20099.
+Yu A Malkov and Dmitry A Yashunin. Efficient and robust approximate nearest neighbor search
+using hierarchical navigable small world graphs. IEEE transactions on pattern analysis and
+machineintelligence,42(4):824–836,2018.
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Belle-
+mare,AlexGraves,MartinRiedmiller,AndreasKFidjeland,GeorgOstrovski,etal.Human-level
+controlthroughdeepreinforcementlearning. nature,518(7540):529–533,2015.
+Alexander Novikov, Ngaˆn Vu˜, Marvin Eisenberger, Emilien Dupont, Po-Sen Huang, Adam Zsolt
+Wagner, Sergey Shirobokov, Borislav Kozlovskii, Francisco JR Ruiz, Abbas Mehrabian,
+et al. Alphaevolve: A coding agent for scientific and algorithmic discovery. arXiv preprint
+arXiv:2506.13131,2025.
+Ivan Rodkin, Yuri Kuratov, Aydar Bulatov, and Mikhail Burtsev. Associative recurrent memory
+transformer. arXivpreprintarXiv:2407.04841,2024.
+JohnSchulman,FilipWolski,PrafullaDhariwal,AlecRadford,andOlegKlimov. Proximalpolicy
+optimizationalgorithms. arXivpreprintarXiv:1707.06347,2017.
+Ning Shang, Li Lyna Zhang, Siyuan Wang, Gaokai Zhang, Gilsinia Lopez, Fan Yang, Weizhu
+Chen, and Mao Yang. Longrope2: Near-lossless llm context window scaling. arXiv preprint
+arXiv:2502.20082,2025.
+Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao Bi, Haowei Zhang,
+MingchuanZhang,YKLi,etal. Deepseekmath: Pushingthelimitsofmathematicalreasoningin
+openlanguagemodels. arXivpreprintarXiv:2402.03300,2024.
+Weijia Shi, Sewon Min, Michihiro Yasunaga, Minjoon Seo, Richard James, Mike Lewis, Luke
+Zettlemoyer, and Wen-tau Yih. Replug: Retrieval-augmented black-box language models. In
+Proceedingsofthe2024ConferenceoftheNorthAmericanChapteroftheAssociationforCom-
+putationalLinguistics:HumanLanguageTechnologies(Volume1:LongPapers),pp.8364–8377,
+2024.
+Aditi Singh, Abul Ehtesham, Saket Kumar, and Tala Talaei Khoei. Agentic retrieval-augmented
+generation:Asurveyonagenticrag,2025.URLhttps://arxiv.org/abs/2501.09136.
+HuatongSong, JinhaoJiang, YingqianMin, JieChen, ZhipengChen, WayneXinZhao, LeiFang,
+and Ji-Rong Wen. R1-searcher: Incentivizing the search capability in llms via reinforcement
+learning. arXivpreprintarXiv:2503.05592,2025.
+ArtyomSorokin,NazarBuzun,LeonidPugachev,andMikhailBurtsev.Explainmysurprise:Learn-
+ingefficientlong-termmemorybypredictinguncertainoutcomes. AdvancesinNeuralInforma-
+tionProcessingSystems,35:36875–36888,2022.
+HarshTrivedi,NiranjanBalasubramanian,TusharKhot,andAshishSabharwal.Musique:Multihop
+questionsviasingle-hopquestioncomposition.TransactionsoftheAssociationforComputational
+Linguistics,10:539–554,2022.
+RogerWaleffe,WonminByeon,DuncanRiach,BrandonNorick,VijayKorthikanti,TriDao,Albert
+Gu,AliHatamizadeh,SudhakarSingh,DeepakNarayanan,etal. Anempiricalstudyofmamba-
+basedlanguagemodels. arXivpreprintarXiv:2406.07887,2024.
+ChenghanYang,RuiyuZhao,YangLiu,andLingJiang.Surveyofspecializedlargelanguagemodel.
+arXivpreprintarXiv:2508.19667,2025.
+12
+===== PAGE 13 =====
+PublishedasaconferencepaperatICLR2026
+Diji Yang, Jinmeng Rao, Kezhen Chen, Xiaoyuan Guo, Yawen Zhang, Jie Yang, and Yi Zhang.
+Im-rag: Multi-roundretrieval-augmentedgenerationthroughlearninginnermonologues. InPro-
+ceedingsofthe47thInternationalACMSIGIRConferenceonResearchandDevelopmentinIn-
+formationRetrieval,pp.730–740,2024.
+Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William Cohen, Ruslan Salakhutdinov,
+and Christopher D Manning. Hotpotqa: A dataset for diverse, explainable multi-hop question
+answering. InProceedingsofthe2018ConferenceonEmpiricalMethodsinNaturalLanguage
+Processing,pp.2369–2380,2018.
+Tan Yu, Anbang Xu, and Rama Akkiraju. In defense of rag in the era of long-context language
+models. arXivpreprintarXiv:2409.01666,2024.
+Jiahao Zhang, Haiyang Zhang, Dongmei Zhang, Liu Yong, and Shen Huang. End-to-end beam
+retrievalformulti-hopquestionanswering. InProceedingsofthe2024ConferenceoftheNorth
+AmericanChapteroftheAssociationforComputationalLinguistics:HumanLanguageTechnolo-
+gies(Volume1: LongPapers),pp.1718–1731,2024.
+JianshuZhao,JeanPierreBoth,andKonstantinosTKonstantinidis. Approximatenearestneighbor
+graphprovidesfastandefficientembeddingwithapplicationsforlarge-scalebiologicaldata.NAR
+GenomicsandBioinformatics,6(4):lqae172,2024.
+Brian D Ziebart. Modeling purposeful adaptive behavior with the principle of maximum causal
+entropy. CarnegieMellonUniversity,2010.
+13
+===== PAGE 14 =====
+PublishedasaconferencepaperatICLR2026
+A INNER PRODUCT APPROXIMATION FOR Q-FUNCTION
+The classical Universal Approximation Theorem (UAT) asserts that sufficiently expressive neural
+networks can approximate any continuous function on a compact domain arbitrarily well. In this
+section,weproveavariantoftheUATforfunctionsdecomposedasaninnerproductbetweenstate
+embeddingsandactionembeddingsmodulatedbyapositionalblock-diagonalmatrix.
+LetX ⊂Rdx,Y ⊂Rdy andT ⊂RbecompactsetsanddefineK =X×Y ×T. Wewillapproxi-
+mateanyf ∈C(K,R)intheuniformnorm. OnemayidentifyX withtheenvironmentstatespace
+S,Y withthesetofavailableactionsA(seeSection3),andinterprett ∈ T asarelativepositional
+encoding for actions2. Under this correspondence, a function f(x,y,t) represents a ground-truth
+Q-function. IftheQ-functiondoesnotdependonpositiont,onecansimplytakef tobeconstant
+int.
+Ourstartingpointisthereal-valuedscorefunction
+F′(x,y,t)= (cid:10) hR(x), R
+t
+gR(y) (cid:11)
+R2m
+, (8)
+wherem∈Nisarbitrary,hR :X →R2mandgR :Y →R2marecontinuousencoders(e.g.,neural
+networks),andR ∈ R2m×2m isaposition-dependentblockrotationactingindependentlyoneach
+t
+coordinatepair. ThestandardRotaryPositionEmbedding(RoPE)ispreciselyafamilyt (cid:55)→ R of
+t
+thistype.
+Ausefulreformulationisthateveryreal-valuedscoreoftheformequation8canbewrittenasthe
+real part of a complex inner product after identifying R2m ∼ = Cm. Under this identification, the
+RoPE block rotation R corresponds to multiplication by a diagonal complex matrix Λ(t), which
+t
+bothclarifiesthestructureandmotivatesthemoregeneralcomplex-diagonalscoreclassconsidered
+below:
+F(x,y,t)=Re(⟨h(x), Λ(t)g(y)⟩ ), Λ(t)=diag(ϕ (t),...,ϕ (t)), (9)
+Cm 1 m
+whereh∈C(X,Cm),g ∈C(Y,Cm),andeachdiagonalentryϕ isdrawnfromafunctionalgebra
+k
+Φ⊂C(T,C).
+Wefirstshowthateveryrealblock-rotationscoreequation8(inparticular,RoPE)canbewrittenin
+complex-diagonalform,withΛ(t)=diag(eiθ1t,...,eiθmt)forsuitablefixedfrequenciesθ
+k
+.
+We then prove that, whenever Φ is a sufficiently rich (self-adjoint) subalgebra of C(T,C), the in-
+duced complex-diagonal class is dense in C(K,R) in the uniform norm. This yields the desired
+universal approximation property; standard RoPE is recovered as a special case by choosing Φ to
+containtherelevantexponentials.
+Real-valued block rotations as a complex-diagonal operator. Fix m ∈ N. Define the real-to-
+complexidentificationρ:R2m →Cmby
+ρ (cid:0) (a ,a ,...,a ,a )⊤(cid:1) =(a +ia , a +ia , ..., a +ia )⊤. (10)
+1 2 2m−1 2m 1 2 3 4 2m−1 2m
+We use the standard Hermitian inner product on Cm, ⟨u,v⟩Cm := u∗v = (cid:80)m
+k=1
+u
+k
+v
+k
+. Then for
+anya,b∈R2m,
+⟨a,b⟩R2m =Re(⟨ρ(a),ρ(b)⟩Cm ).
+Letθ ,...,θ ∈RbefixedfrequenciesandletR ∈R2m×2mbetheblock-diagonalrotation
+1 m t
+(cid:18) (cid:19)
+(cid:0) (cid:1) cosα −sinα
+R =diag R(θ t),...,R(θ t) , R(α)= .
+t 1 m sinα cosα
+Definethecomplexdiagonalmatrix
+Λ(t)=diag (cid:0) eiθ1t,...,eiθmt(cid:1) ∈Cm×m.
+Adirectcheckoneach2×2blockshowsthatρ(R z)=Λ(t)ρ(z)forallz ∈R2m. Consequently,
+t
+foranyreal-valuedencodershR :X →R2mandgR :Y →R2m,
+⟨hR(x),R
+t
+gR(y)⟩R2m =Re(⟨ρ(hR(x)), Λ(t)ρ(gR(y))⟩
+Cm
+). (11)
+2InSection3.3thepositionalencodingisdenotedbyρ(i).Hereweavoidthisnotationtopreventconfusion
+withthemapρ:R2m →CmusedbelowtoidentifyR2m ∼=Cm.
+14
+===== PAGE 15 =====
+PublishedasaconferencepaperatICLR2026
+Inparticular,wheneveranalgebraΦ⊂C(T,C)containstheexponentialst(cid:55)→eiθkt,thereal-valued
+block-rotationscoreequation8(andhencestandardRoPE)isaspecialcaseofthecomplex-diagonal
+scoreclassA definednext.
+Φ
+Theorem1(ComplexInner-productapproximationwithdiagonalpositionalmatrix). LetX ⊂Rdx,
+Y ⊂ Rdy andT ⊂ Rbecompactsets,andK = X ×Y ×T. LetΦ ⊂ C(T,C)beaself-adjoint
+subalgebra(i.e.,ϕ∈Φ⇒ϕ∈Φ)whichcontainsconstantsandseparatespointsofT:
+1∈Φ, ∀t ̸=t ∃ϕ∈Φ: ϕ(t )̸=ϕ(t ).
+1 2 1 2
+Definethefunctionclass
+(cid:91) (cid:110) (cid:12) (cid:111)
+A
+Φ
+= (x,y,t)(cid:55)→Re(⟨h(x),Λ(t)g(y)⟩Cm ) (cid:12)
+(cid:12)
+h∈C(X,Cm), g ∈C(Y,Cm), Λ∈Λ
+Φ,m
+,
+m∈N
+(12)
+where
+(cid:110) (cid:12) (cid:111)
+Λ := Λ:T →Cm×m (cid:12)Λ(t)=diag(ϕ (t),...,ϕ (t)), ϕ ∈Φ ,
+Φ,m (cid:12) 1 m k
+and ⟨u,v⟩Cm := u∗v. Then A
+Φ
+is dense in C(K,R) in the uniform norm. Equivalently, for any
+f ∈C(K,R)andanyε>0thereexistm,h,gandΛasabovesuchthat
+(cid:12) (cid:12)
+sup (cid:12)
+(cid:12)
+f(x,y,t)−Re (cid:0) ⟨h(x),Λ(t)g(y)⟩Cm (cid:1)(cid:12)
+(cid:12)
+<ε. (13)
+(x,y,t)∈K
+Proof. Considertheset
+(cid:40) (cid:88) J (cid:12) (cid:12) (cid:41)
+B = u (x)v (y)ϕ (t)(cid:12)J ∈N, u ∈C(X,C), v ∈C(Y,C), ϕ ∈Φ ⊂C(K,C).
+k k k (cid:12) k k k
+(cid:12)
+k=1
+DensityofB inC(K,C). FirstweshowthatB isaself-adjointsubalgebraofC(K,C)thatcon-
+tainsconstantsandseparatespoints. Closureunderadditionandscalarmultiplicationisimmediate.
+Tocheckclosureunderproducts,take
+J J′
+b(x,y,t)= (cid:88) u (x)v (y)ϕ (t), b′(x,y,t)= (cid:88) u˜ (x)v˜ (y)ϕ˜ (t),
+k k k ℓ ℓ ℓ
+k=1 ℓ=1
+withu ,u˜ ∈C(X,C),v ,v˜ ∈C(Y,C),ϕ ,ϕ˜ ∈Φ. Then
+k ℓ k ℓ k ℓ
+J J′
+(b·b′)(x,y,t)= (cid:88)(cid:88)(cid:0) u u˜ (cid:1) (x) (cid:0) v v˜ (cid:1) (y) (cid:0) ϕ ϕ˜ (cid:1) (t).
+k ℓ k ℓ k ℓ
+k=1ℓ=1
+Since C(X,C) and C(Y,C) are algebras under pointwise multiplication, u u˜ ∈ C(X,C) and
+k ℓ
+v v˜ ∈C(Y,C). BecauseΦisasubalgebra,ϕ ϕ˜ ∈Φ. Henceb·b′ ∈B,soBisanalgebra.
+k ℓ k ℓ
+Also1∈Bbytakingu≡1,v ≡1,ϕ≡1. Self-adjointnessfollowsfrompointwiseconjugation:
+u(x)v(y)ϕ(t)=u(x)v(y)ϕ(t),
+andtheassumptionsϕ∈Φandu∈C(X,C),v ∈C(Y,C).
+AdditionallyB separatespointsofK. Let(x ,y ,t ) ̸= (x ,y ,t ). Ifx ̸= x ,chooseacoordi-
+1 1 1 2 2 2 1 2
+nateprojectionu(x)=x withx ̸=x ,andsetv ≡1,ϕ≡1;thenu(x )̸=u(x ). Similarlyif
+j 1,j 2,j 1 2
+y ̸=y .Ift ̸=t ,usetheassumptionthatΦseparatespointsofT:pickϕ∈Φwithϕ(t )̸=ϕ(t )
+1 2 1 2 1 2
+andsetu≡1,v ≡1.
+By the complex Stone–Weierstrass theorem (self-adjoint subalgebra, contains constants, separates
+points),B =C(K,C).
+15
+===== PAGE 16 =====
+PublishedasaconferencepaperatICLR2026
+RealpartsofBlieinA . Takeanyb∈B:
+Φ
+J
+(cid:88)
+b(x,y,t)= u (x)v (y)ϕ (t).
+k k k
+k=1
+Letm=J,
+h(x)=(u (x),...,u (x))⊤, g(y)=(v (y),...,v (y))⊤, Λ(t)=diag(ϕ (t),...,ϕ (t)).
+1 J 1 J 1 J
+Using⟨a,b⟩Cm =a∗b,
+J J
+(cid:88) (cid:88)
+⟨h(x),Λ(t)g(y)⟩Cm = h
+k
+(x)ϕ
+k
+(t)g
+k
+(y)= u
+k
+(x)v
+k
+(y)ϕ
+k
+(t)=b(x,y,t), (14)
+k=1 k=1
+henceRe(b)∈A .
+Φ
+Approximationofreal-valuedfunctions. Letf ∈C(K,R)andε>0. Viewf asanelementof
+C(K,C). Pickb∈Bsuchthat∥f −b∥ <ε. DefineF =Re(b). Then,using|Rez|≤|z|,
+∞
+∥f −F∥ =∥f −Re(b)∥ =∥Re(f −b)∥ ≤∥f −b∥ <ε. (15)
+∞ ∞ ∞ ∞
+AsshownaboveF ∈A ,whichprovesdensityinC(K,R).
+Φ
+ThequalitativeapproximationpropertyestablishedinTheorem1doesnotrevealhowtherequired
+featuredimensionscaleswiththedesiredaccuracy. Afirststeptowardaquantitativeunderstanding
+isLemma1,whichgivesarated−s/(dx+dy)forapproximatingstationarykernelsinHs(X×Y).By
+incorporating thislemma intoa Fourieranalysis ofthe temporal variable, we obtainthe following
+theoremthathandlesthefull(x,y,t)-dependentcaseandachievestherated−s/(dx+dy+1).
+Lemma1(L2low-rankapproximationofSobolevkernels). LetX ⊂RdxandY ⊂Rdy bebounded
+Lipschitzdomains,andsetD = d +d . Lets > 0andleta ∈ Hs(X ×Y)bereal(orcomplex)-
+x y
+valued. Thenforeveryintegerd≥1thereexistmeasurablefeaturemaps
+h∈L2(cid:0) X;Cd(cid:1)
+, g
+∈L2(cid:0) Y;Cd(cid:1)
+, (16)
+suchthat
+(cid:13) (cid:13)a(·,·)−⟨h(·),g(·)⟩ Cd (cid:13) (cid:13) L2(X×Y) ≤Cd−s/D∥a∥ Hs(X×Y) . (17)
+HereC >0dependsonlyons,d ,d andthegeometryofX,Y.
+x y
+Proof. Consider the bounded Lipschitz domain Ω := X × Y ⊂ RD. By a Sobolev extension
+theoremforboundedLipschitzdomains,thereexistsaboundedlinearoperator
+E :Hs(Ω)→Hs(RD) (18)
+suchthatEu| =uforallu∈Hs(Ω). Applyittoa: leta:=Ea∈Hs(RD),then
+Ω (cid:101)
+∥ (cid:101) a∥ Hs(RD) ≤C ext ∥a∥ Hs(Ω) . (19)
+ChooseacubeQ ⊂ RD withsidelengthLsuchthatΩ ⊂ Q. Takeacut-offfunctionχ ∈ C∞(Q)
+c
+satisfying χ ≡ 1 on Ω and 0 ≤ χ ≤ 1, with suppχ ⋐ Q (in particular, dist(suppχ,∂Q) > 0).
+Defineu:=χ·a.Thenu∈Hs(RD),suppu⊂Q,andu| =a.Byboundednessofmultiplication
+(cid:101) Ω
+byasmoothcompactlysupportedfunction,
+∥u∥ Hs(RD) ≤C χ ∥ (cid:101) a∥ Hs(RD) ≤C χ C ext ∥a∥ Hs(Ω) . (20)
+Nowperiodiseu.SincesuppuiscompactlycontainedinQ,thefunctionuvanishesinaneighbour-
+hoodof∂Q.IdentifyQwithafundamentaldomainoftheD-dimensionaltorusTD :=RD/(LZ)D.
+L
+DefinetheL-periodicextension
+(cid:88)
+u (z):= u(z+Lk), z ∈RD. (21)
+per
+k∈ZD
+16
+===== PAGE 17 =====
+PublishedasaconferencepaperatICLR2026
+ThesumislocallyfiniteanddefinesanL-periodicfunctiononRD. Becauseuvanishesnear∂Q,
+thereisnojumpacrossthefacesofQ;henceu definesafunctiononTD. Moreover,thestandard
+per L
+estimateforperiodisationyields
+∥u per ∥ Hs(TD) ≤C per ∥u∥ Hs(RD) , (22)
+L
+whereC dependsonlyonL(equivalently,onthechoiceofQ).
+per
+OnTD theHs-normcanbeexpressedviaFouriercoefficients:
+L
+(cid:88)
+∥v∥2 ≍ (1+|k|2)s|v |2, (23)
+Hs(TD) L (cid:98)k
+L
+k∈ZD
+wherev aretheFouriercoefficientsintheexpansion
+(cid:98)k
+(cid:88)
+u (z)= u e2πik·z/L, z =(x,y)∈TD. (24)
+per (cid:98)k L
+k∈ZD
+ForagivenintegerN ≥1considerthetruncatedsum
+(cid:88)
+P (z):= u e2πik·z/L, (25)
+N (cid:98)k
+∥k∥∞≤N
+atrigonometricpolynomialofdegreeN. ByParseval’sidentity,
+(cid:88)
+∥u −P ∥2 = |u |2. (26)
+per N L2(TD) (cid:98)k
+L
+∥k∥∞>N
+For∥k∥ >N wehave|k|≥N,hence(1+|k|2)−s ≤(1+N2)−s,so
+∞
+|u |2 ≤(1+N2)−s(1+|k|2)s|u |2.
+(cid:98)k (cid:98)k
+Insertingthisintoequation26andusingequation23gives
+∥u −P ∥2 ≤C(1+N2)−s∥u ∥2 . (27)
+per N L2(TD) per Hs(TD)
+L L
+Takingsquarerootsandusing(1+N2)−s/2 ≤C′N−syields
+∥u −P ∥ ≤C N−s∥u ∥ . (28)
+per N L2(TD) 1 per Hs(TD)
+L L
+Combiningequation19,equation20,equation22,andequation28weobtain
+∥u −P ∥ ≤C N−s∥a∥ . (29)
+per N L2(TD) 2 Hs(Ω)
+L
+Sinceu =u=aonΩ,restrictiondoesnotincreasetheL2-error:
+per
+∥a−P ∥ ≤∥u −P ∥ ≤C N−s∥a∥ . (30)
+N L2(Ω) per N L2(TD) 2 Hs(Ω)
+L
+Nowcountthenumberofretainedmodes:
+d:=#{k ∈ZD :∥k∥ ≤N}=(2N +1)D ≍ND. (31)
+∞
+HenceN−s ≍d−s/D,andequation30implies
+∥a−P ∥ ≤C d−s/D∥a∥ . (32)
+N L2(Ω) 3 Hs(Ω)
+It remains to write P
+N
+as an inner product of feature maps. Write k = (k
+x
+,k
+y
+) with k
+x
+∈ Zdx,
+k
+y
+∈ Zdy, so that e2πik·(x,y)/L = e2πikx·x/Le2πiky·y/L. Enumerate all admissible indices k with
+∥k∥ ≤N ask(1),...,k(d)andset
+∞
+h j (x):=u (cid:98)k(j) e−2πik x (j)·x/L, g j (y):=e2πik y (j)·y/L. (33)
+Define the vector-valued maps h(x) = (h (x),...,h (x)) and g(y) = (g (y),...,g (y)). Then
+1 d 1 d
+h ∈ L2(X;Cd) and g ∈ L2(Y;Cd), and using the standard Hermitian inner product ⟨α,β⟩ Cd :=
+(cid:80)d
+α β weobtain
+j=1 j j
+d
+⟨h(x),g(y)⟩ Cd = (cid:88) u (cid:98)k(j) e2πi(k x (j)·x+k y (j)·y)/L =P N (x,y). (34)
+j=1
+Togetherwithequation32thisyieldstheclaim. TheconstantC dependsonlyons,d ,d ,andthe
+3 x y
+geometryofX,Y (throughthenormsoftheextension,cut-off,andperiodisationoperatorsandthe
+choiceofQ).
+17
+===== PAGE 18 =====
+PublishedasaconferencepaperatICLR2026
+Theorem 2 (Approximation by RoPE-type feature maps in L2). Let X ⊂ Rdx and Y ⊂ Rdy be
+boundedLipschitzdomains,setD =d +d ,andletT =R/{2πZ}withendpointsidentified.
+x y
+Lets>0beaninteger,considerareal-valuedfunctionf andassume
+f ∈L2(cid:0) T;Hs(X×Y) (cid:1) , ∂sf ∈L2(cid:0) T;L2(X×Y) (cid:1) . (35)
+t
+Define
+M :=∥f∥ +∥∂sf∥ . (36)
+L2(T;Hs(X×Y)) t L2(T;L2(X×Y))
+ThenthereexistsaconstantC >0,dependingonlyons,d ,d andthegeometryofX,Y,suchthat
+x y
+foreveryintegerd≥1onecanfindfeaturemapsh∈L2(X;Cd′)andg ∈L2(Y;Cd′)withd′ ≤d,
+andafamilyofunitarymatrices{Λ(t)} ⊂Cd′×d′ oftheform
+t∈T
+Λ(t)=diag (cid:0) eiω1t,...,eiω d′t(cid:1) , ω
+j
+∈Z, (37)
+suchthat
+(cid:13) (cid:13)f(·,·,·)−Re(⟨h(·),Λ(·)g(·)⟩ Cd′ ) (cid:13) (cid:13) L2(X×Y×T) ≤CMd−β, β = D s +1 . (38)
+Proof. We begin by expanding f in a Fourier series with respect to the periodic variable t ∈ T.
+DefinetheFouriercoefficients
+1 (cid:90) 2π
+a (x,y):= f(x,y,t)e−iktdt, k ∈Z, (39)
+k 2π
+0
+whichbelongtoL2(X×Y)becausef ∈L2(T;L2(X×Y)). Thenf canbewrittenas
+(cid:88)
+f(x,y,t)= a (x,y)eikt, (40)
+k
+k∈Z
+andParseval’sidentitygivestheequalities
+(cid:88)
+∥f∥2 =2π ∥a ∥2 , (41)
+L2(X×Y×T) k L2(X×Y)
+k∈Z
+(cid:88)
+∥∂sf∥2 =2π |k|2s∥a ∥2 . (42)
+t L2(X×Y×T) k L2(X×Y)
+k∈Z
+Theserelationsarethestartingpointforboththetemporaltruncationandthelow-rankspatialap-
+proximation.
+Temporaltruncation. Foracut-offfrequencyN ∈NweconsiderthetruncatedFouriersum
+(cid:88)
+f(N)(x,y,t):= a (x,y)eikt. (43)
+k
+|k|≤N
+Usingequation41andequation42weestimatetheerrormadebythistruncation:
+(cid:88)
+∥f −f(N)∥2 =2π ∥a ∥2
+L2(X×Y×T) k L2
+|k|>N
+(cid:88)
+≤2πN−2s |k|2s∥a ∥2 (44)
+k L2
+|k|>N
+≤N−2s∥∂sf∥2 .
+t L2(X×Y×T)
+Takingsquarerootsweobtain
+∥f −f(N)∥ ≤N−s∥∂sf∥ . (45)
+L2(X×Y×T) t L2(X×Y×T)
+18
+===== PAGE 19 =====
+PublishedasaconferencepaperatICLR2026
+Low-rank approximation of the spatial coefficients. Because f ∈ L2(T;Hs(X ×Y)), each
+coefficienta belongstoHs(X×Y)andtheHsnormssatisfytheParseval-typerelation
+k
+(cid:88)
+2π ∥a ∥2 =∥f∥2 . (46)
+k Hs(X×Y) L2(T;Hs(X×Y))
+k∈Z
+Wenowfixanintegerr ≥1(thesameforallfrequencies|k|≤N)andapplyLemma1toeverya
+k
+withrankparameterd = r. Thelemmasuppliesfunctionsh : X → Cr andg : Y → Cr such
+k k
+that
+∥a −⟨h ,g ⟩∥ ≤C r−s/D∥a ∥ . (47)
+k k k L2(X×Y) 0 k Hs(X×Y)
+Usingtheseapproximationswedefineafunctionthatmimicsf(N):
+(cid:88)
+f(cid:101) (N)(x,y,t):= eikt⟨h
+k
+(x),g
+k
+(y)⟩Cr . (48)
+|k|≤N
+BecausetheFouriermodeseikt areorthogonalinL2(T),theerrorbetweenf(N) andf(cid:101)(N) canbe
+expressedwithoutcross-terms:
+(cid:88)
+∥f(N)−f(cid:101) (N)∥2
+L2(X×Y×T)
+=2π ∥a
+k
+−⟨h
+k
+,g
+k
+⟩∥2
+L2(X×Y)
+. (49)
+|k|≤N
+Insertingtheestimateequation47andusingequation46weobtain
+∥f(N)−f(cid:101) (N)∥
+L2(X×Y×T)
+≤C
+1
+r−s/D∥f∥
+L2(T;Hs(X×Y))
+, (50)
+whereC isaconstantthatabsorbsC andthefactorcomingfromthesumofthesquaredHsnorms.
+1 0
+AssemblingaglobalRoPE-typerepresentation. Letusnowcollectallthecomponentmapsinto
+singlevectors. Set
+d′ :=(2N +1)r, (51)
+andnotethatd′ ≤dbythechoicer =⌊d/(2N +1)⌋. Define
+h(x):=
+(cid:0)
+h (x),...,h (x)
+(cid:1) ∈Cd′
+, g(y):=
+(cid:0)
+g (y),...,g (y)
+(cid:1) ∈Cd′
+. (52)
+−N N −N N
+Fortherotationmatriceswetaketheblock-diagonaloperator
+Λ(t):=diag (cid:0) e−iNtI , e−i(N−1)tI , ..., eiNtI (cid:1) , (53)
+r r r
+whichisclearlyoftheformdiag(eiω1t,...,eiω d′t)withintegerfrequenciesω
+j
+(eachfrequencyk
+isrepeatedrtimes). Adirectcomputationshowsthat
+(cid:88)
+⟨h(x),Λ(t)g(y)⟩
+Cd′
+= eikt⟨h
+k
+(x),g
+k
+(y)⟩Cr =f(cid:101) (N)(x,y,t). (54)
+|k|≤N
+Choice of the cut-off N and final error estimate. Combining the estimates equation 45, equa-
+tion50andtheidentityequation54weobtainfromthetriangleinequality
+∥f −⟨h,Λ(t)g⟩∥
+L2
+≤∥f −f(N)∥
+L2
++∥f(N)−f(cid:101) (N)∥
+L2
+(55)
+≤N−s∥∂sf∥ +C r−s/D∥f∥ . (56)
+t L2 1 L2(T;Hs)
+Recallthatrisrelatedtothetotaldimensiondbyr =⌊d/(2N+1)⌋;forlargedwehaver ≍d/N.
+Substitutingthisasymptoticrelationintoequation55yields
+(cid:16) (cid:17)
+∥f −⟨h,Λ(t)g⟩∥ ≤C N−s∥∂sf∥ +(d/N)−s/D∥f∥ .
+L2 2 t L2 L2(T;Hs)
+WenowchooseN sothatthetwotermsbalance. SettingN =⌊d1/(D+1)⌋gives
+N−s ≍d−s/(D+1), (d/N)−s/D ≍d−s/(D+1).
+Consequently,
+(cid:16) (cid:17)
+∥f −⟨h,Λ(t)g⟩∥ ≤C ∥∂sf∥ +∥f∥ d−s/(D+1). (57)
+L2(X×Y×T) t L2 L2(T;Hs)
+19
+===== PAGE 20 =====
+PublishedasaconferencepaperatICLR2026
+Finally, note that the quantity ∥∂sf∥ +∥f∥ is bounded by a constant multiple of the
+t L2 L2(T;Hs)
+norm M appearing in the statement of the theorem (because the L2 norms are controlled by the
+correspondingC(T;Hs)norms). Thuswearriveatthedesiredestimate
+∥f −Re(⟨h,Λ(t)g⟩)∥ ≤∥f −⟨h,Λ(t)g⟩∥ ≤CMd−s/(D+1). (58)
+L2 L2
+Remark. Theorem2providesanL2(X ×Y ×T)errorbound, whichisnaturalformean-square
+losses and leads to a clean rate because orthogonality in t (Parseval) can be fully exploited. A
+uniform-in-(x,y,t)bound,
+∥f −⟨h,Λ(·)g⟩∥ , (59)
+L∞(X×Y×T)
+isstrictlystrongerandrequiresadditionalingredientsbeyondtheL2 proof. Therearetwostandard
+routes.
+1. UniformboundsfromSobolevembedding(typicallyslowerratesunderHs only). Assume
+onlythespatialSobolevregularityusedinTheorem2,namelyf(·,·,t)∈Hs(X×Y)withs>D/2.
+TopassfromanHs-estimatetoL∞ oneusesSobolevembeddingHs0(X ×Y) (cid:44)→ L∞(X ×Y)
+withanys >D/2. Atypicalspectral-truncationargumentthengives,foranyfixeds ∈(D/2,s),
+0 0
+alow-rankboundoftheform
+∥a−rank-d∥
+L∞(X×Y)
+≤Cd−(s−s0)/D∥a∥
+Hs(X×Y)
+. (60)
+Choosings =D/2+εyieldsthemoreexplicit(butslightlyweaker)rate
+0
+∥a−rank-d∥ ≤C d−(s−D/2−ε)/D∥a∥ . (61)
+L∞(X×Y) ε Hs(X×Y)
+PluggingthisL∞low-rankestimateintotheRoPEconstruction(andusingavector-valuedJackson
+boundintfollowedbySobolevembeddingin(x,y))leadstoauniformapproximationrate
+s(s−D/2−ε)
+∥f −⟨h,Λ(·)g⟩∥
+L∞(X×Y×T)
+≤C
+ε
+Md−βε, β
+ε
+=
+Ds+s−D/2−ε
+. (62)
+Inparticular,onegenerallypaysanε-lossandasmallerexponentthanintheL2theoremwhenonly
+Hs-regularityisassumedinspace.
+2.RecoveringcleanL∞ratesbystrengtheningspatialsmoothness.Ifonestrengthensthespatial
+regularityoff (uniformlyint)sothatanL∞-stableapproximationtheoryapplies,thentheuniform
+RoPE approximation can match the clean algebraic rates. One convenient sufficient condition is
+additionalSobolevsmoothness: assumethatforsomeσ >0,
+∂ℓf ∈C (cid:0) T;Hs+σ(X×Y) (cid:1) , 0≤ℓ≤s, (63)
+t
+and retain s > D/2 to guarantee Hs(X ×Y) (cid:44)→ L∞(X ×Y). Then one can approximate each
+Fouriercoefficienta inHsatrater−σ/D∥a ∥ ,andafterembeddingobtain
+k k Hs+σ
+(cid:16) (cid:17)
+∥f −⟨h,Λ(·)g⟩∥ ≤CM N−s+r−σ/D , (64)
+L∞(X×Y×T) σ
+withM := max ∥∂ℓf∥ andr ≈ d/(2N +1)asintheproof. OptimizingN then
+σ 0≤ℓ≤s t C(T;Hs+σ)
+yieldsanexponent
+sσ
+β = , (65)
+Ds+σ
+andinthebalancedcaseσ =sthisrecoversβ =s/(D+1)inL∞(atthecostofrequiringH2s-type
+smoothnessin(x,y)).
+Theorem2onlyrequiresh ∈ L2(X;Cd)andg ∈ L2(Y;Cd). Uniform-in-(x,y)boundstypically
+requireadditionalregularity(andsometimesstrongerboundaryregularityofX,Y)ifonewantsh,g
+tobecontinuousonX,Y.
+TheL2 theoremissharpandtechnicallyrobustunderminimalassumptions. UniformL∞ control
+isstronger,butiteitheryieldsaslowerrateunderpureHs assumptionsorrequiresstrongerspatial
+smoothnessassumptionstoretainthecleanexponent.
+20
+===== PAGE 21 =====
+PublishedasaconferencepaperatICLR2026
+B EARLY STOPPING EXPERIMENTS
+Inthissection,westudyasimpleearlystoppingrulefortheretrievalagent. Let
+a=(a ,a ,...,a )
+1 2 T
+bethefullsequenceofchunkstheagentwouldselectifnostoppingthresholdwereapplied,andlet
+Gbeasetofground-truthchunksforthecurrentquestion.
+For each step t, the agent outputs a Q-value Q for taking the next retrieval action. Given a fixed
+t
+Q-value threshold Q , we simulate an early-stopping policy that keeps taking actions while
+threshold
+Q ≥ Q andterminatesassoonasQ < Q . Wedenotebyt thenumberofactions
+t threshold t threshold stop
+actuallytakenunderthispolicy,i.e.thenumberofselectedchunks:
+t =numberofstepsuntilthefirsttwithQ <Q .
+stop t threshold
+Independently of the stopping rule, we define t as the earliest step at which all ground-truth
+earliest
+chunkshavealreadybeencollected:
+(cid:8) (cid:9)
+t =min t : {a ,...,a }⊇G .
+earliest 1 t
+Iftheagentnevercollectsallground-truthchunks,i.e.suchatdoesnotexist,wediscardthisepisode
+fromtheanalysisbelow.
+For comparison, we also consider an oracle stopping policy that is allowed to look at the ground
+truth: it knows t for each episode and simply stops at this step. By construction, this oracle
+earliest
+policyneverstopstooearlyortoolate.
+Dependingontherelationbetweent andt wedistinguishthreeoutcomes.
+stop earliest
+Earlystop(“early”). Ift <t ,thestoppingruleterminatesbeforeallground-truthchunks
+stop earliest
+havebeenselected. Inthiscasetheerrorisduetostoppingtooearlyandmissingpotentiallyuseful
+chunks.
+Perfect stop (“perfect”). If t = t , the stopping rule terminates exactly at the first step
+stop earliest
+whenthesetofselectedchunksalreadycontainsallground-truthchunks. Inthiscase,thestopping
+behaviorisoptimalwithrespecttoourdefinition.
+Latestop(“late”). Ift > t ,thenatsomeearliersteptheagenthadalreadycollectedall
+stop earliest
+ground-truthchunksbutcontinuedtoretrieveadditionalchunks. Thiscorrespondstostoppingtoo
+lateandtakingunnecessarysteps.
+Figure4(toprow,panel(a))showshowtheproportionsofearlyandlateerrorschangeasafunction
+oftheQ-valuethresholdQ onHotPotQA.Forsmallthresholds,theagentalmostneverstops
+threshold
+tooearlybutmaycontinuetoretrieveredundantchunks,whichleadstolateerrors. Asthethreshold
+increases,lateerrorsdecrease,buttheprobabilityofstoppingtooearlygrows.
+Panel(b)ofFigure4reportstheproportionof“perfect”stoppingevents,peakingaroundthresholds
+Q ≈0.1–0.3. Panel(c)showstheaveragenumberofselectedchunks(episodelength)under
+threshold
+thesamepolicy.Largerthresholdsleadtoshorterepisodes,butoncethethresholdbecomestoohigh,
+theearly-stoperrorraterapidlyincreasesandperformancedegrades.
+Table5 summarises these trade-offs quantitatively on HotPotQA for the GTE embedder with
+penalize extra steps=True and never terminate=True. We report the fraction of
+early,lateandperfectstops,theaverageepisodelength,andthefinalFactEMandFactF1scores,
+aswellasthecorrespondingtruepositiverate(TPR)andfalsepositiverate(FPR)forthestopping
+ruleviewedasabinaryclassifier. ThebestFactF1isachievedatQ = 0.2, confirmingthat
+threshold
+moderate thresholds provide a good balance between taking enough retrieval steps and avoiding
+unnecessaryones.
+UsingtheTPRandFPRcolumnsofTables5and6,wecanplotthereceiveroperatingcharacteristic
+(ROC)curvesoftheearly-stoppingrule,showninFigure5. Panel(a)correspondstoHotPotQAand
+panel(b)toBabiLongQA2. EachpointonthecurvescorrespondstoaparticularQ-valuethreshold
+21
+===== PAGE 22 =====
+PublishedasaconferencepaperatICLR2026
+(a) (b) (c)
+(d) (e) (f)
+Figure4: EarlystoppinganalysisonHotPotQA(toprow)andBabiLongQA2(bottomrow). Panels
+(a,d)showtheproportionsofearlyandlateerrorsasafunctionoftheQ-valuethresholdQ .
+threshold
+Panels(b,e)showtheproportionofperfectstops. Panels(c,f)showtheaveragenumberofselected
+chunks(episodelength).
+Table5: HotPotQAearlystoppingexperiments
+Q-valuethreshold stoppedearly stoppedlater perfectstop TPR FPR Episodelen FactEM FactF1 AnsEM AnsF1
+-0.1 0 0.979 0.021 0.983 0.380 4.99 0.968 0.563 0.588 0.759
+0.0 0.015 0.395 0.590 0.976 0.110 2.82 0.954 0.843 0.592 0.761
+0.1 0.061 0.060 0.879 0.952 0.041 2.23 0.910 0.915 0.593 0.756
+0.2 0.088 0.020 0.892 0.937 0.032 2.13 0.883 0.917 0.587 0.752
+0.3 0.104 0.006 0.890 0.927 0.029 2.08 0.868 0.915 0.585 0.747
+0.4 0.118 0.002 0.880 0.919 0.027 2.05 0.854 0.911 0.575 0.737
+0.5 0.132 0 0.867 0.910 0.025 2.02 0.840 0.907 0.571 0.734
+0.6 0.144 0 0.856 0.903 0.024 2.00 0.829 0.902 0.570 0.730
+0.7 0.157 0 0.843 0.891 0.023 1.96 0.817 0.895 0.564 0.724
+0.8 0.202 0 0.798 0.840 0.017 1.82 0.773 0.847 0.546 0.702
+0.9 0.417 0 0.583 0.611 0.006 1.27 0.565 0.620 0.444 0.588
+1.0 0.910 0 0.090 0.105 0.000 0.21 0.088 0.111 0.266 0.385
+1.1 1.000 0 0 0 0 0 0 0 – –
+Q . The red star in each panel marks the oracle stopping policy introduced above, which
+threshold
+knows t and stops exactly at that step; this point serves as an upper bound on the achievable
+earliest
+trade-off between TPR and FPR. On HotPotQA the area under the curve (AUC) is 0.96, and for
+BabiLongQA2itis0.97.
+Figure 4 (bottom row) and Table 6 report the same analysis on BabiLong QA2. Qualitatively, the
+behaviour of the stopping rule is similar to HotPotQA: higher thresholds lead to shorter episodes
+andmoreearlystops,whilelowerthresholdsreduceearly-stoperrorsatthecostofmorelatestops
+andlongerepisodes.
+However,thetransitionbetweentheseregimesismuchsharperonBabiLongQA2.Forthresholdsin
+therangeQ ∈[0.2,0.6]thefractionofperfectstopsremainsveryhigh(≈0.95–0.99),while
+threshold
+theaverageepisodelengthisreducedfromabout6toroughly2.2retrievalsteps. InthisregionFact
+EM and Fact F1 stay close to their maximum values (Fact F1 around 0.95), and answer accuracy
+(AnsEM/F1)isalsonear-optimal. Onlywhenthethresholdapproaches1.0,performancecollapses,
+astheagentstopsalmostimmediatelyandmissesrelevantchunks.
+22
+===== PAGE 23 =====
+PublishedasaconferencepaperatICLR2026
+1.0
+0.8
+0.6
+0.4
+0.2
+0.0
+0.0 0.2 0.4 0.6 0.8 1.0
+False Positive Rate
+(a)HotPotQA
+etaR
+evitisoP
+eurT
+ROC Curve
+ROC curve (area = 0.970)
+Oracle Point
+(b)BabiLongQA2
+Figure5: ROCcurvesfortheearly-stoppingrule. Panel(a)showsHotPotQA;panel(b)showsBa-
+biLongQA2. Thedashedlineindicatesrandomperformance. Eachpointcorrespondstoadifferent
+Q-value threshold Q . The red star denotes the oracle stopping policy that always stops at
+threshold
+t ,i.e.exactlywhenthelastground-truthchunkhasbeenretrieved.
+earliest
+Table6: BabiLongQA2earlystoppingexperiments.
+Q-valuethreshold stoppedearly stoppedlater perfectstop Episodelen FactEM FactF1 AnsEM AnsF1
+-0.10 0.000 0.994 0.006 6.00 0.996 0.499 0.884 0.884
+0.00 0.000 0.994 0.006 6.00 0.996 0.499 0.884 0.884
+0.10 0.000 0.498 0.502 2.86 0.996 0.845 0.944 0.944
+0.20 0.000 0.036 0.964 2.29 0.996 0.949 0.976 0.976
+0.30 0.006 0.010 0.984 2.25 0.990 0.952 0.970 0.970
+0.40 0.008 0.002 0.990 2.24 0.988 0.953 0.970 0.970
+0.50 0.008 0.000 0.992 2.23 0.988 0.954 0.972 0.972
+0.60 0.016 0.000 0.984 2.21 0.980 0.948 0.968 0.968
+0.70 0.042 0.000 0.958 2.16 0.954 0.934 0.948 0.948
+0.80 0.112 0.000 0.888 2.06 0.884 0.905 0.884 0.884
+0.90 0.177 0.000 0.823 1.92 0.820 0.861 0.830 0.830
+1.00 0.930 0.000 0.070 0.22 0.070 0.107 0.230 0.230
+1.10 1.000 0.000 0.000 0.00 0.000 0.000 0.000 0.000
+C PLANNING FOR MULTI-STEP RETRIEVAL
+We can apply planning at the multi-step retrieval stage, formulating source selection as a search
+over the space of action trajectories; see § 4.4 for an application. In the spirit of Beam Retriever,
+wecanrunbeamsearchwherecandidatesarerankedbythelearnedaction-valuefunctionQ (s,a).
+θ
+However, our planning is computationally cheaper because Q is computed as a dot product of
+θ
+state and action embeddings, Q (s,a) = ⟨E (s), E (a)⟩, so no new transformer forward passes
+θ s a
+are required for each candidate chunk, whereas Beam Retriever relies on a transformer reranker
+overtrajectories,incurringfreshforwardpassesateveryexpansion. Detailsoftheembedding-based
+scoringareprovidedin§3.2. Atinference,weperformbeamsearchoverQanddeterministically
+expandthetop-kactionsbyQ .
+θ
+D METHOD COMPLEXITY AND EFFICIENCY
+Q-RAGproducesafinalanswerusingtwomaincomponents.Thefirstisamulti-stepretrievalagent
+that performs iterative search over the full document to collect all context-relevant evidence (see
+sec. 3.2). The second is an LLM Answerer that conditions on the retrieved chunks and generates
+thefinalresponse. Importantly,onlytheretrievalagentinteractswiththeoriginallongcontext;the
+effectivecontextlengthseenbytheLLMAnswererdependssolelyontheretrievalhyperparameters
+23
+===== PAGE 24 =====
+PublishedasaconferencepaperatICLR2026
+(e.g., number of retrieval steps T, maximum chunk length). Consequently, the time and memory
+complexityoftheLLMAnswererwithrespecttotheoriginalcontextlengthN arebothO(1). The
+retrieval agent consists of two embedders: state embedder E and action embedder E (see sec.
+s a
+3.2).
+Chunk Embedding. The action embedder computes embeddings for chunks of the original doc-
+ument. If the document has length N and the chunk size is n , embedding the entire document
+c
+(cid:16) (cid:17)
+takesO N t , wheret istheembeddingtimeperchunk(treatedasaconstant). Theaction
+nc act act
+embedderperformsasinglepassoverallchunksperretrievalepisode;thusitscomplexityislinear
+inN,i.e.,O(N).
+State Embedding. The state embedder processes the state K times per episode (once per search
+step). Fromtheconstructionofthestate(seefig. 1), thetotalcostoveranepisodeisO(Kt ),
+state
+wherestateembeddingtimet dependsonn andK,butnotonN. Hence,thestateembedder
+state c
+isO(1)withrespecttodocumentlengthN.
+Search Policy. To select the next chunk at each step, we compute the inner product between the
+current state embedding and all action embeddings. With a naive implementation, selecting all K
+(cid:16) (cid:17)
+actionsovertheepisoderequiresO Kd N =O(N),whered isthedimensionalityofthe
+emb nc emb
+embedding vectors. This can be reduced using approximate kNN methods that achieve sub-linear
+querytimeinpractice(Malkov&Yashunin,2018;Zhaoetal.,2024).
+Overalltimecomplexity. Summingthetermsaboveyields
+(cid:18) (cid:19)
+N N
+O t + Kt + Kd = O(N),
+n act state emb n
+c c
+sinceK,t ,t ,andd donotdependonN.
+act state emb
+Spacecomplexity. Themainpartthatdirectlydependsondocumentlengthisthenumberofchunk
+(cid:16) (cid:17)
+embeddings we need to store: O d N = O(N). In practice, embeddings are lightweight;
+emb nc
+GPUmemoryismainlyconsumedbytheLLMweightsandtheactionembedderforwardpasses.By
+cappingtheactionembedder’sbatchsize(parameterchunk batch),thegrowthofpeakmemory
+withN becomesnegligible.
+TrainingTimeEfficiency. AcriticalpracticaladvantageoftheQ-RAGframeworkisitsefficient
+andrapidtrainingconvergence,asdemonstratedinFigure6. Thelearningcurvesdepictthemodel’s
+performanceevolutionontwodistinctandchallengingbenchmarks:BabiLongQA2andHotPotQA.
+Thecurvesshowasharpinitialriseinevaluationmetricscores,followedbyastableplateau,indi-
+cating that the model quickly learns the core retrieval-augmented generation task. Notably, this
+convergenceisachievedwithinapproximately12hoursoftrainingtimeonaGPUsetup.
+1.0
+0.9
+0.8
+0.7
+0.6
+0.5
+0.4
+0.3
+0 1 2 3 4
+Time (hours)
+nruter
+lavE
+Babilong QA2
+1.0
+0.9
+0.8
+0.7
+0.6
+0.5
+0.4
+0.3
+0.2
+0 1 2 3 4 5 6
+Time (hours)
+nruter
+lavE
+HotPotQA
+Figure6: LearningcurvesforHotPotQAandBabiLongQA2runs. Bothgraphsshowtheaverage
+episodicreturnwithrespecttotrainingtime.
+24
+===== PAGE 25 =====
+PublishedasaconferencepaperatICLR2026
+E EXTRA QA RESULTS
+Table7comparesmulti-stepretrievalmethodsonHotPotQA-distractors,MuSiQue(in-distribution),
+and MuSiQue (out-of-distribution). It reports both fact-retrieval (Fact F1, Fact EM) and
+answer-generation(AnsF1,AnsEM)scores.Q-RAGanditsplannedvariant(PlanQ-RAG)achieve
+strong overall results, especially on out-of-distribution data, while Beam-Retriever leads on Hot-
+PotQA but generalizes less robustly. Methods with missing entries did not report results for the
+correspondingdatasetormetric.
+Table 7: Comparison of methods on HotPotQA-distractors, MuSiQue (in-distribution), and
+MuSiQue(OOD).Boldtextandunderlinedenotethebestandsecondbestscoresrespectively.
+HotPotQA MuSiQue MuSiQue(OOD) Average
+Methods FactF1FactEMAnsF1AnsEMFactF1FactEMAnsF1AnsEMFactF1FactEMAnsF1AnsEMAnsF1AnsEM
+PlanQ-RAG+QwQ-32B 0.95 0.91 0.76 0.60 0.84 0.76 0.60 0.44 0.69 0.53 0.51 0.36 0.62 0.46
+Q-RAG+QwQ-32B 0.93 0.89 0.76 0.59 0.81 0.72 0.59 0.43 0.71 0.55 0.52 0.37 0.62 0.46
+BeamRetriever+QwQ-32B 0.97 0.94 0.77 0.61 0.86 0.69 0.59 0.43 0.61 0.36 0.40 0.27 0.59 0.44
+Search-R1 0.81 0.66 0.65 0.52 – – – – 0.71 0.55 0.51 0.39 – –
+Search-o1 – – – – – – – – – – – – – –
+GraphReader – – – – – – – – – – – – – –
+HippoRAG – – – – – – – – – – – – – –
+F TRAINING DETAILS
+WetrainedthemodelwithAdamW(learningrate1.5×10−5,β =0.9,β =0.98,ϵ=10−6,weight
+1 2
+decay5×10−4). Thelearningratefollowedalinearschedule: weusedawarm-upof1,000steps,
+thenlinearlydecayedtherateto10%ofitsinitialvalueovertheremainingtrainingsteps.Weapplied
+gradientclippingwithamaximumℓ normof2.0andusedgradientaccumulationfor8steps. The
+2
+basemini-batchsizewas12; withaccumulationthisyieldsaneffectivebatchsizeof12×8 = 96
+perupdate(scaledbythenumberofdevicesifusingdistributedtraining).
+Intheobjectiveandalgorithmiccomponentswesetγ=0.99,α=0.05,λ=0.5,andτ=0.02. Action
+representationswerecappedatamaximumlengthof220tokens.
+Theend-to-endtrainingofasinglemodeldidnotexceed12hoursonasingleA100-80GBGPU.
+Models per benchmark. For open-domain QA benchmarks (HotPotQA, MuSiQue), we trained
+multilingual-e5-large and Alibaba-NLP/gte-multilingual-base encoders.
+ForRULERandBabiLong,wetrainedfacebook/contriever.
+G EVALUATION DETAILS
+LLMModelsforgeneration. Tocomputeanswer-levelmetrics(AnsEMandAnsF1),wecon-
+dition the QwQ-32B model on the question and the retrieved text chunks. All answer-generation
+results reported for Q-RAG and Plan Q-RAG on the HotPotQA and MuSiQue benchmarks were
+obtainedunderconsistentgenerationsettings: decodingwithtemperature0.0andamaximumout-
+putlengthofmax tokens = 8000. FortheBabiLongandRULERexperiments,weinsteadused
+Qwen-4Bwithmax tokens=512andreasoningdisabled(enable thinking=False).
+Retrieval configuration. For Q-RAG, we limit the number of retrieval steps to T = 2 on Hot-
+PotQA;forRULERandBabiLongweuseT = 4. Thesamesteplimitsareusedwhenevaluating
+Search-R1andBeamRetriever.
+Wesplitdocumentsintofixed-length,non-overlappingchunks,aimingnottobreaksentencesacross
+chunkboundaries. Thechunklengthisprimarilydeterminedbythecontextwindowoftheembed-
+dersusedinourmainexperiments(512tokens)andthenumberofretrievalsteps. ForNeedle-in-a-
+HaystackandBabiLongweuseachunklengthof64tokens. Foropen-domainQAtaskswesetthe
+chunklengthasafunctionofthenumberofretrievalstepsi.e. forHotPotQAwesegmentthecorpus
+intochunksofatmost220tokens(T =2);forMuSiQueweuseactionchunksofatmost110tokens
+(T =4). Inadditionalexperimentswitha‘Alibaba-NLP/gte-multilingual-base‘(8kcontextlength)
+weuseachunklengthof256tokens.
+25
+===== PAGE 26 =====
+PublishedasaconferencepaperatICLR2026
+Dataset Setting Chunksize T Backboneretriever AnsweringLLM
+HotPotQA Q-RAG/PlanQ-RAG 220 2 multilingual-e5-large QwQ-32B
+HotPotQA Q-RAG(earlystopping) 256 5 Alibaba-NLP/gte-multilingual-base QwQ-32B
+MuSiQue Q-RAG/PlanQ-RAG 110 4 multilingual-e5-large QwQ-32B
+BabiLong Q-RAG 64 4 facebook/contriever Qwen3-4B
+RULER Q-RAG 64 4 facebook/contriever Qwen3-4B
+Table8: Retrievalandgenerationconfigurationforeachdataset. Chunksizeisintokens; T isthe
+maximumnumberofretrievalsteps.
+Fact-level metrics. Let S be the set of ground-truth supporting facts and S be the set of
+gt pred
+predictedsupportingfactsreturnedbytheretriever. OurFactEMmetricisdefinedas
+(cid:40)
+1, ifS ⊆S ,
+gt pred
+Fact-EM=
+0, otherwise.
+Equivalently, in code: em = 1.0 if gt sf.issubset(pred sf) else 0.0. Thus
+FactEMgivesfullcreditwheneverthepredictioncoversallground-truthfacts,evenifitalsocon-
+tains additional, irrelevant chunks; it does not require the predicted and ground-truth sets to be
+exactlyequal.
+26
