@@ -50,13 +50,13 @@ class BertPredictor(nn.Module):
  
         out = self.model.forward(
             input_ids, attention_mask, return_dict=False
-        )[0]
+        )[0]  # last hidden state  transform有多层，取最后一层
 
         if self.n_output > 1:
-            prediction  = out[:, 1: self.n_output + 1]
+            prediction = out[:, 1: self.n_output + 1]
         else:
             mask = attention_mask.reshape(out.shape[0], out.shape[1], 1)
-            prediction  = (out * mask).sum(1) / mask.sum(1)
+            prediction = (out * mask).sum(1) / mask.sum(1)
 
         #print(f'Embedder Output [shape={prediction.shape}, dtype={prediction.dtype}, device={prediction.device}]')
         return prediction / 10

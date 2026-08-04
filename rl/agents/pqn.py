@@ -95,8 +95,8 @@ class PQN(object):
         # self.action_embed_length = config.pqn.hyperparams.action_embed_length
         self.max_action_length_in_memory = config.pqn.hyperparams.max_action_length_in_memory
 
-        state_embed: nn.Module = instantiate(config.pqn.state_embed)
-        action_embed: nn.Module = instantiate(config.pqn.action_embed)
+        state_embed: nn.Module = instantiate(config.pqn.state_embed)  # BertPredictor
+        action_embed: nn.Module = instantiate(config.pqn.action_embed)  # RelativePositionProcessor
         state_embed_target: nn.Module = instantiate(config.pqn.state_embed_target)
         action_embed_target: nn.Module = instantiate(config.pqn.action_embed_target)
         state_embed_copy = copy.deepcopy(state_embed)

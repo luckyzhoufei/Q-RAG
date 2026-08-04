@@ -2,12 +2,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 from torch import nn, Tensor
 import torch
-from collections import namedtuple
 from typing import Tuple, Dict, List, Any, Union
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-import os
-from torch.nn.utils.rnn import pad_sequence
-from sortedcontainers import SortedList
 from envs.utils import Transition, stack_text_list, TextMemory, TextMemoryItem, torch_cat_dict
 
 
@@ -75,7 +70,7 @@ class RandomPositionProcessor(PositionProcessor):
         
         idx = np.arange(n)
         split_id = sorted(np.random.choice(idx[1:n-1], size=num_splits-1, replace=False))
-        splits  = np.split(idx, split_id)
+        splits = np.split(idx, split_id)
         result = [e+indent for split, indent in zip(splits, indents) for e in split]
         return sorted(result) 
     
@@ -116,8 +111,8 @@ class TextEnv:
             embeds, embeds_target = [], []
             for i in range(0, B, max_B):
                 inputs = (batch['input_ids'][i:i + max_B], batch['attention_mask'][i:i+max_B], positions[i:i+max_B])
-                embeds.append( embedder(*inputs) )
-                embeds_target.append( embedder_target(*inputs) )
+                embeds.append(embedder(*inputs))
+                embeds_target.append(embedder_target(*inputs))
 
             embeds = torch_cat_dict(embeds, dim=0)
             embeds_target = torch_cat_dict(embeds_target, dim=0)
@@ -209,3 +204,8 @@ class TextEnv:
         
         return self.memory, memory_item, done
 
+
+if __name__ == "__main__":
+    p = RelativePositionProcessor(10)
+    print(p.initialize_positions(60))
+    print(p.update_positions([3, 5], range(20)))

@@ -1,13 +1,9 @@
-from abc import abstractmethod
 import numpy as np
 from torch import nn, Tensor
 import torch
 from collections import namedtuple
 from typing import Tuple, Dict, List, Any, Union
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-import os
-from torch.nn.utils.rnn import pad_sequence
-from sortedcontainers import SortedList
 from functools import reduce
 from envs.text_env import TextEnv
 from envs.utils import custom_pad_sequence, stack_actions, stack_memory
