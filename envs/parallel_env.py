@@ -69,7 +69,7 @@ class ParallelTextEnv:
             embeds_target_pt = custom_pad_sequence(a_embeds_target_pos, padding_value=0.0, batch_first=True,
                                                    pad_to_power_2=False)
 
-            action, _, q_values = agent.select_action_batch(s_par, embeds_pt, embeds_target_pt, random=random)
+            action, _, q_values = agent.select_action_batch(s_par, embeds_pt, embeds_target_pt, random=random)  # s_par=state
             action = action.cpu().numpy().reshape(-1)
             q_values = q_values.cpu().numpy().reshape(-1)
 

@@ -96,7 +96,7 @@ class PQN(object):
         self.max_action_length_in_memory = config.pqn.hyperparams.max_action_length_in_memory
 
         state_embed: nn.Module = instantiate(config.pqn.state_embed)  # BertPredictor
-        action_embed: nn.Module = instantiate(config.pqn.action_embed)  # RelativePositionProcessor
+        action_embed: nn.Module = instantiate(config.pqn.action_embed)  # EmbedderWithRelativeEncoding
         state_embed_target: nn.Module = instantiate(config.pqn.state_embed_target)
         action_embed_target: nn.Module = instantiate(config.pqn.action_embed_target)
         state_embed_copy = copy.deepcopy(state_embed)
@@ -106,11 +106,11 @@ class PQN(object):
         self.critic_optim = instantiate(config.pqn.optimizer, params=self.critic.parameters())
         self.scheduler = instantiate(config.pqn.scheduler, optimizer=self.critic_optim)
        
-        self.policy = TextQNetPolicy(state_embed_copy, self.critic).to(torch.get_default_device())
+        self.policy = TextQNetPolicy(state_embed_copy, self.critic).to(torch.get_default_device())  # critic主要是用其中的state来给state_embed_copy更新参数的
         self.random_policy = TextRandomPolicy().to(torch.get_default_device())
 
-        self.v_net_target = TextVNet(state_embed_target, self.critic).to(torch.get_default_device())
-        self.action_embed_target = ActionEmbedTarget(action_embed_target, self.critic).to(torch.get_default_device())  # 不通过梯度更新
+        self.v_net_target = TextVNet(state_embed_target, self.critic).to(torch.get_default_device()) # critic主要是用其中的state来给state_embed_copy更新参数的
+        self.action_embed_target = ActionEmbedTarget(action_embed_target, self.critic).to(torch.get_default_device())  # 不通过梯度更新 critic主要是用其中的action来给action_embed_target更新参数的
 
         self.state_tokenizer = state_embed.tokenizer
         self.action_tokenizer = action_embed.tokenizer
@@ -252,8 +252,7 @@ class PQN(object):
     def eval(self):
         self.policy.eval()
         self.critic.action_embed.eval()
-        # self.v_net_target.train()
-        # self.action_embed_target.train()
+
 
     def save(self, checkpoint_path: str, verbose=False) -> None:
         """
@@ -330,7 +329,7 @@ class PQNActor:
         positions = torch.tensor(positions, device=torch.get_default_device())
         embedder = self.agent.critic.action_embed
         embedder_target = self.agent.action_embed_target
-        self.embeds[k] = embedder.update_pos(self.embeds[k], positions=positions)
+        self.embeds[k] = embedder.update_pos(self.embeds[k], positions=positions)  # EmbedderWithRelativeEncoding 添加rope位置编码
         self.embeds_target[k] = embedder_target.update_pos(self.embeds_target[k], positions=positions)
         
     def step(self, s_seq, chunks, positions, is_random):
